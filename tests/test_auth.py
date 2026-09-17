@@ -1,5 +1,4 @@
 import pytest
-import httpx
 from unittest.mock import MagicMock, patch
 
 from auth.iaaa import get_session

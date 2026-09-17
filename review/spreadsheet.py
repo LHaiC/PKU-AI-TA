@@ -23,7 +23,6 @@ _HEADER_FONT = Font(bold=True)
 COLUMNS = [
     "student_id",
     "student_name",
-    "bb_user_id",
     "assignment_id",
     "total_score",
     "total_max",
@@ -60,7 +59,6 @@ def export(results: list[ScoringResult], path: Path) -> None:
         row_data = [
             r.student_id,
             r.student_name,
-            r.bb_user_id,
             r.assignment_id,
             r.total_score,
             r.total_max,
@@ -113,7 +111,6 @@ def load_reviewed(path: Path) -> list[ReviewRecord]:
         result = ScoringResult(
             student_id=str(row[idx["student_id"]]),
             student_name=str(row[idx["student_name"]]),
-            bb_user_id=str(row[idx["bb_user_id"]] or "") if "bb_user_id" in idx else "",
             assignment_id=str(row[idx["assignment_id"]]),
             total_score=float(row[idx["total_score"]]),
             total_max=float(row[idx["total_max"]]),

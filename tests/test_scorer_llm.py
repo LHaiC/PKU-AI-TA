@@ -47,12 +47,12 @@ class TestParseJson:
 
 class TestExtractText:
     def test_returns_string(self):
-        att = Attachment(filename="report.pdf", content_type="application/pdf", data=b"%PDF-fake")
+        att = Attachment(filename="report.pdf", data=b"%PDF-fake")
         result = _extract_text(att)
         assert isinstance(result, str)
 
     def test_handles_unreadable_pdf(self):
-        att = Attachment(filename="bad.pdf", content_type="application/pdf", data=b"not a real pdf")
+        att = Attachment(filename="bad.pdf", data=b"not a real pdf")
         result = _extract_text(att)
         # Should not raise; returns an error message instead
         assert isinstance(result, str)
@@ -123,7 +123,7 @@ class TestScoreSubmission:
         mock_client.chat.completions.create.return_value = self._mock_response(json.dumps(VALID_LLM_RESPONSE))
         mock_get_client.return_value = mock_client
 
-        att = Attachment(filename="essay.pdf", content_type="application/pdf", data=b"%PDF")
+        att = Attachment(filename="essay.pdf", data=b"%PDF")
         sub = self._make_submission(attachments=[att])
         score_submission(sub, rubric="Rubric.")
 

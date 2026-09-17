@@ -23,9 +23,11 @@ try:
     # Optional: Configure readline for better behavior
     readline.parse_and_bind('set editing-mode emacs')
 except ImportError:
-    # Try pyreadline3 for Windows (pip install pyreadline3)
+    # pyreadline3 (the Windows pyreadline fork) also ships a top-level
+    # `readline` shim, so on Windows the import above usually succeeds once
+    # the dependency is installed. Keep this explicit fallback for safety.
     try:
-        import pyreadline as readline  # type: ignore
+        import pyreadline3 as readline  # type: ignore
     except ImportError:
         # No readline available, but input() still works on Windows
         # Windows console has basic line editing support built-in
@@ -63,14 +65,6 @@ def prompt_text(prompt_label: str, default: str = "", console: Console | None = 
         if allow_interrupt:
             raise
         return default
-
-
-def prompt_choice(prompt_label: str, choices: list[str], default: str | None = None, console: Console | None = None) -> str:
-    """Prompt for a choice from a list using rich.prompt.Prompt.
-
-    This is fine for simple menu selections where no text editing is needed.
-    """
-    return Prompt.ask(prompt_label, choices=choices, default=default)
 
 
 def find_submission_file(submissions_dir: Path, student_id: str, student_name: str) -> Path | None:

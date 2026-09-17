@@ -1,43 +1,19 @@
 from __future__ import annotations
 
-from enum import Enum
-from pathlib import Path
-from typing import Any
-
 from pydantic import BaseModel, Field
-
-
-class SubmissionType(str, Enum):
-    TEXT = "text"
-    PDF = "pdf"
-    WORD = "word"
-    UNKNOWN = "unknown"
 
 
 class Attachment(BaseModel):
     filename: str
-    content_type: str
-    data: bytes  # raw bytes; parsers convert to text
-
-    @property
-    def submission_type(self) -> SubmissionType:
-        ext = Path(self.filename).suffix.lower()
-        if ext == ".pdf":
-            return SubmissionType.PDF
-        if ext in {".doc", ".docx"}:
-            return SubmissionType.WORD
-        return SubmissionType.UNKNOWN
+    data: bytes  # raw bytes
 
 
 class Submission(BaseModel):
     student_id: str           # real student number, e.g. "2000012515"
     student_name: str
     assignment_id: str        # gradeBookPK (numeric string) or column ID
-    assignment_title: str
-    bb_user_id: str = ""      # Blackboard internal user ID, e.g. "_35185_1" (needed for grade submission)
     text_content: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
-    submitted_at: str = ""  # ISO string from platform
     already_graded: bool = False  # True if the newest attempt is already graded on PKU website
 
 
@@ -57,7 +33,6 @@ class UncertainPart(BaseModel):
 class ScoringResult(BaseModel):
     student_id: str
     student_name: str
-    bb_user_id: str = ""      # passed through from Submission for grade submission
     assignment_id: str
     total_score: float
     total_max: float

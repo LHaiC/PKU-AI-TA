@@ -1,9 +1,7 @@
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from models import CriterionScore, ReviewRecord, ScoringResult, UncertainPart
+from models import CriterionScore, ScoringResult, UncertainPart
 from review.spreadsheet import export, load_reviewed
 
 

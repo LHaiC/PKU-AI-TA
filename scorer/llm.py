@@ -259,7 +259,6 @@ def score_submission(submission: Submission, rubric: str, prompt: Path = _DEFAUL
     return ScoringResult(
         student_id=submission.student_id,
         student_name=submission.student_name,
-        bb_user_id=submission.bb_user_id,
         assignment_id=submission.assignment_id,
         total_score=_f(data.get("total_score")),
         total_max=_f(data.get("total_max")),

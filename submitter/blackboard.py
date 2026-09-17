@@ -64,18 +64,10 @@ def _fetch_student_meta(client: httpx.Client, course_id: str, grade_book_pk: str
 
     meta: dict[str, dict] = {}
     for m in _STUDENT_PATTERN.finditer(html):
-        groups = m.groups()
-        if len(groups) == 6:
-            _, user_id, file_pk, _, attempt_pk, _ = groups
-        else:
-            _, user_id, file_pk, _, attempt_pk = groups
+        _, user_id, file_pk, _, attempt_pk, _ = m.groups()
         meta[user_id] = {"filePk": file_pk, "attemptPk": attempt_pk}
     for m in _STUDENT_ONCLICK_PATTERN.finditer(html):
-        groups = m.groups()
-        if len(groups) == 4:
-            user_id, file_pk, attempt_pk, _ = groups
-        else:
-            user_id, file_pk, attempt_pk = groups
+        user_id, file_pk, attempt_pk, _ = m.groups()
         meta.setdefault(user_id, {"filePk": file_pk, "attemptPk": attempt_pk})
 
     return meta, title
@@ -119,49 +111,86 @@ def submit_scores(
     records: list[ReviewRecord],
     *,
     dry_run: bool = False,
-) -> None:
+    quiet: bool = False,
+) -> list[dict]:
     """
     Submit approved grades via saveStudentGrade.do.
 
     column_id may be "_423829_1" (BB REST format) or bare "423829" (gradeBookPK).
+    Returns one result dict per approved record; set quiet=True to suppress
+    human-readable output (used by `ta submit --json`).
     """
+    def log(*args, **kwargs) -> None:
+        if not quiet:
+            console.print(*args, **kwargs)
+
     grade_book_pk = column_id.strip("_").split("_")[0]
 
     approved = [r for r in records if r.approved]
     skipped = len(records) - len(approved)
     if skipped:
-        console.print(f"[yellow]Skipping {skipped} unapproved record(s).[/yellow]")
+        log(f"[yellow]Skipping {skipped} unapproved record(s).[/yellow]")
     if not approved:
-        return
+        return []
 
     if dry_run:
+        results: list[dict] = []
         for r in approved:
-            console.print(
+            log(
                 f"[dim][DRY RUN][/dim] Would submit: "
                 f"{r.result.student_id} ({r.result.student_name})"
-                f" → {r.final_score}/{r.result.total_max}"
+                f" → {r.final_score:g}/{r.result.total_max:g}"
                 f"  notes: {(r.reviewer_notes or '')[:60]}"
             )
-        return
+            results.append({
+                "student_id": r.result.student_id,
+                "student_name": r.result.student_name,
+                "score": r.final_score,
+                "total_max": r.result.total_max,
+                "dry_run": True,
+                "ok": True,
+                "error": "",
+            })
+        return results
 
     # ── Step 1: fetch filePk / attemptPk for all students ────────────────
-    console.print("  Fetching submission metadata…")
+    log("  Fetching submission metadata…")
     try:
         student_meta, assignment_title = _fetch_student_meta(client, course_id, grade_book_pk)
     except httpx.HTTPStatusError as e:
-        console.print(f"[red]Error fetching student list:[/red] {e}")
-        return
-    console.print(f"  Found metadata for {len(student_meta)} student(s). Assignment: [cyan]{assignment_title}[/cyan]")
+        log(f"[red]Error fetching student list:[/red] {e}")
+        return [{
+            "student_id": r.result.student_id,
+            "student_name": r.result.student_name,
+            "score": r.final_score,
+            "total_max": r.result.total_max,
+            "dry_run": False,
+            "ok": False,
+            "error": f"failed to fetch student list: {e}",
+        } for r in approved]
+    log(f"  Found metadata for {len(student_meta)} student(s). Assignment: [cyan]{assignment_title}[/cyan]")
 
     # ── Step 2: for each approved student, fetch gradePk and submit ──────
-    ok = 0
+    results = []
     for r in approved:
         uid = r.result.student_id
         score = r.final_score
         notes = (r.reviewer_notes or "").strip()
 
+        def _fail(error: str) -> None:
+            results.append({
+                "student_id": uid,
+                "student_name": r.result.student_name,
+                "score": score,
+                "total_max": r.result.total_max,
+                "dry_run": False,
+                "ok": False,
+                "error": error,
+            })
+
         if uid not in student_meta:
-            console.print(f"[yellow]⚠[/yellow]  {uid} ({r.result.student_name}): no submission metadata — skipping")
+            log(f"[yellow]⚠[/yellow]  {uid} ({r.result.student_name}): no submission metadata — skipping")
+            _fail("no submission metadata")
             continue
 
         meta = student_meta[uid]
@@ -173,13 +202,15 @@ def submit_scores(
                 uid, meta["filePk"], meta["attemptPk"], assignment_title,
             )
         except httpx.HTTPStatusError as e:
-            console.print(f"[red]✗[/red]  {uid} ({r.result.student_name}): "
-                          f"failed to load CheckWork.do — {e}")
+            log(f"[red]✗[/red]  {uid} ({r.result.student_name}): "
+                f"failed to load CheckWork.do — {e}")
+            _fail(f"failed to load CheckWork.do: {e}")
             continue
 
         if grade_pk is None:
-            console.print(f"[yellow]⚠[/yellow]  {uid} ({r.result.student_name}): "
-                          "gradePk not found in page JS — skipping")
+            log(f"[yellow]⚠[/yellow]  {uid} ({r.result.student_name}): "
+                "gradePk not found in page JS — skipping")
+            _fail("gradePk not found in page JS")
             continue
 
         score_str = str(int(score)) if score == int(score) else str(score)
@@ -195,18 +226,29 @@ def submit_scores(
         try:
             resp = client.post(SUBMIT_ENDPOINT, data=payload)
             resp.raise_for_status()
-            console.print(
+            log(
                 f"[green]✓[/green]  {uid} ({r.result.student_name})"
-                f" → {score_str}/{r.result.total_max}"
+                f" → {score_str}/{r.result.total_max:g}"
             )
-            ok += 1
+            results.append({
+                "student_id": uid,
+                "student_name": r.result.student_name,
+                "score": score,
+                "total_max": r.result.total_max,
+                "dry_run": False,
+                "ok": True,
+                "error": "",
+            })
         except httpx.HTTPStatusError as e:
-            console.print(
+            log(
                 f"[red]✗[/red]  {uid} ({r.result.student_name}): "
                 f"HTTP {e.response.status_code} — {e.response.text[:300]}"
             )
+            _fail(f"HTTP {e.response.status_code}: {e.response.text[:300]}")
 
+    ok = sum(1 for item in results if item["ok"])
     result_color = "green" if ok == len(approved) else "yellow"
-    console.print(
+    log(
         f"\n[{result_color}]Done.[/{result_color}] {ok}/{len(approved)} grade(s) submitted."
     )
+    return results

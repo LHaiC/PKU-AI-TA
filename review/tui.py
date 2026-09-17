@@ -7,13 +7,8 @@ Press 'e' to edit individual criterion scores, 'r' to open the rubric, 'b' to go
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
-from typing import Optional
 
-import openpyxl
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -21,8 +16,6 @@ from rich.table import Table
 from rich.text import Text
 from review.tui_components import (
     find_submission_file,
-    load_review_data,
-    needs_review_check,
     open_file,
     auto_approve_students,
     ReviewSession,
@@ -35,39 +28,45 @@ from review.tui_components import (
 
 def display_student(console: Console, row_data: dict, row_idx: int, total: int, breakdown: list | None = None) -> list:
     """Display student info and score breakdown using Rich. Returns the breakdown list."""
-    console.print()
-    console.print(Panel.fit(
-        f"[bold cyan]Student {row_idx}/{total}[/bold cyan]",
-        title="Review Progress",
-        border_style="blue"
-    ))
-    info_table = Table(show_header=False, box=None)
-    info_table.add_row("[bold]Student ID:[/]", str(row_data["student_id"]))
-    info_table.add_row("[bold]Name:[/]", str(row_data["student_name"]))
+    narrow = console.width < 100
 
-    # Show override score if present
+    info_table = Table(show_header=False, box=None, pad_edge=False)
+    info_table.add_row("[bold]Student:[/]", f"{row_data['student_id']}  {row_data['student_name']}")
+
+    score_text = f"{row_data['total_score']} / {row_data['total_max']} ({row_data['pct']}%)"
     override_score = row_data.get("reviewer_override_score")
     if override_score is not None and override_score != "":
         try:
             override_val = float(override_score)
             total_max = float(row_data["total_max"])
             override_pct = round((override_val / total_max) * 100, 1) if total_max > 0 else 0
-            info_table.add_row("[bold]Score:[/]", f"[red][strike]{row_data['total_score']} / {row_data['total_max']} ({row_data['pct']}%)[/strike][/red]")
-            info_table.add_row("[bold]Override:[/]", f"[green]{override_val} / {total_max} ({override_pct}%)[/green]")
+            info_table.add_row(
+                "[bold]Score:[/]",
+                f"[red][strike]{score_text}[/strike][/red]  "
+                f"[green]override {override_val:g} / {total_max:g} ({override_pct}%)[/green]",
+            )
         except (ValueError, TypeError):
-            info_table.add_row("[bold]Score:[/]", f"{row_data['total_score']} / {row_data['total_max']} ({row_data['pct']}%)")
+            info_table.add_row("[bold]Score:[/]", score_text)
     else:
-        info_table.add_row("[bold]Score:[/]", f"{row_data['total_score']} / {row_data['total_max']} ({row_data['pct']}%)")
+        info_table.add_row("[bold]Score:[/]", score_text)
 
-    info_table.add_row("[bold]Confidence:[/]", f"{row_data['confidence']}")
-    info_table.add_row("[bold]Needs review:[/]", "[yellow]YES[/yellow]" if row_data["needs_review"] == "YES" else "NO")
-    info_table.add_row("[bold]Current approved:[/]", "[green]YES[/green]" if str(row_data.get("approved", "")).upper() == "YES" else "[red]NO[/red]")
+    review_flag = "[yellow]YES[/yellow]" if row_data["needs_review"] == "YES" else "NO"
+    approved_flag = (
+        "[green]YES[/green]"
+        if str(row_data.get("approved", "")).upper() == "YES"
+        else "[red]NO[/red]"
+    )
+    info_table.add_row(
+        "[bold]Confidence:[/]",
+        f"{row_data['confidence']}   [bold]Needs review:[/] {review_flag}   "
+        f"[bold]Approved:[/] {approved_flag}",
+    )
     current_notes = str(row_data.get("reviewer_notes") or "")
-    if current_notes:
-        info_table.add_row("[bold]Reviewer notes:[/]", f"[green]{current_notes}[/green]")
-    else:
-        info_table.add_row("[bold]Reviewer notes:[/]", "[dim][yellow](none)[/yellow][/dim]")
-    console.print(Panel(info_table, title="Student Info", border_style="cyan"))
+    info_table.add_row(
+        "[bold]Reviewer notes:[/]",
+        f"[green]{current_notes}[/green]" if current_notes else "[dim](none)[/dim]",
+    )
+    console.print(Panel(info_table, title=f"Student {row_idx}/{total}", border_style="cyan"))
 
     if breakdown is None:
         try:
@@ -79,28 +78,39 @@ def display_student(console: Console, row_data: dict, row_idx: int, total: int, 
     if breakdown:
         bd_table = Table(title="Score Breakdown")
         bd_table.add_column("#", style="dim", justify="right")
-        bd_table.add_column("Criterion", style="cyan")
+        bd_table.add_column("Criterion", style="cyan", max_width=40 if narrow else 36,
+                            overflow="fold", no_wrap=False)
         bd_table.add_column("Awarded", justify="right", style="green")
         bd_table.add_column("Max", justify="right")
-        bd_table.add_column("Reasoning", style="dim")
+        if not narrow:
+            bd_table.add_column("Reasoning", style="dim", max_width=60,
+                                overflow="fold", no_wrap=False)
         for i, item in enumerate(breakdown, start=1):
             awarded = float(item.get("points_awarded", 0))
             max_p = float(item.get("points_max", 0))
             style = "red" if awarded < max_p else "green"
-            bd_table.add_row(
-                str(i),
-                str(item.get("criterion", "")),
-                Text(f"{awarded}", style=style),
-                f"{max_p}",
-                str(item.get("reasoning", ""))
-            )
+            if narrow:
+                criterion = Text(str(item.get("criterion", "")))
+                reasoning = str(item.get("reasoning", ""))
+                if reasoning:
+                    criterion.append(f"\n{reasoning}", style="dim")
+                bd_table.add_row(str(i), criterion, Text(f"{awarded}", style=style), f"{max_p}")
+            else:
+                bd_table.add_row(
+                    str(i),
+                    str(item.get("criterion", "")),
+                    Text(f"{awarded}", style=style),
+                    f"{max_p}",
+                    str(item.get("reasoning", "")),
+                )
         console.print(Panel(bd_table, border_style="green"))
 
     try:
         uncertain = json.loads(row_data.get("uncertain_parts_json", "[]"))
         if uncertain:
             uc_table = Table(title="Uncertain Parts")
-            uc_table.add_column("Description", style="yellow")
+            uc_table.add_column("Description", style="yellow", max_width=60,
+                                overflow="fold", no_wrap=False)
             uc_table.add_column("Suggested Score", justify="right")
             for item in uncertain:
                 uc_table.add_row(
@@ -113,7 +123,7 @@ def display_student(console: Console, row_data: dict, row_idx: int, total: int, 
 
     if row_data.get("llm_reasoning"):
         console.print(Panel(
-            Text(str(row_data["llm_reasoning"]), style="dim"),
+            Text(str(row_data["llm_reasoning"]), style="dim", overflow="fold"),
             title="LLM Reasoning",
             border_style="dim"
         ))

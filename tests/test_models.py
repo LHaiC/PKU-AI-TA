@@ -1,5 +1,4 @@
-import pytest
-from models import Attachment, CriterionScore, ReviewRecord, ScoringResult, SubmissionType, UncertainPart
+from models import ReviewRecord, ScoringResult
 
 
 def make_result(**kwargs) -> ScoringResult:
@@ -13,24 +12,6 @@ def make_result(**kwargs) -> ScoringResult:
     )
     defaults.update(kwargs)
     return ScoringResult(**defaults)
-
-
-class TestAttachmentSubmissionType:
-    def test_pdf(self):
-        a = Attachment(filename="report.pdf", content_type="application/pdf", data=b"")
-        assert a.submission_type == SubmissionType.PDF
-
-    def test_docx(self):
-        a = Attachment(filename="essay.docx", content_type="application/octet-stream", data=b"")
-        assert a.submission_type == SubmissionType.WORD
-
-    def test_doc(self):
-        a = Attachment(filename="essay.doc", content_type="application/msword", data=b"")
-        assert a.submission_type == SubmissionType.WORD
-
-    def test_unknown(self):
-        a = Attachment(filename="data.csv", content_type="text/csv", data=b"")
-        assert a.submission_type == SubmissionType.UNKNOWN
 
 
 class TestScoringResultPct:

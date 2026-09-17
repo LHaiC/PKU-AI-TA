@@ -23,9 +23,6 @@ Endpoints (all under /webapps/bb-homeWorkCheck-BBLEARN/homeWorkCheck/):
   downloadBatch.do?course_id=...&gradeBookPK=...&isGroup=false
       → ZIP of all submitted files in the same order as getStudentWork.do.
         Used as a fast alternative to per-student fetching when no whitelist.
-
-BB REST API is used to map student number → BB internal user ID
-(needed for grade submission via PATCH gradebook/columns/{col}/users/{uid}).
 """
 from __future__ import annotations
 
@@ -39,7 +36,6 @@ import httpx
 from models import Attachment, Submission
 
 HW_BASE = "/webapps/bb-homeWorkCheck-BBLEARN/homeWorkCheck"
-BB_API = "/learn/api/public/v1"
 
 # getStudentWork.do has two submission link formats:
 #   1. href="...CheckAloneWork.do?...userId=X&filePk=Y&...&attemptPk=Z">查看</a> (already graded)
@@ -63,7 +59,6 @@ class PKUHomeworkCrawler:
         self.client = client
         self.course_id = course_id
         self.whitelist = whitelist
-        self._bb_user_map: dict[str, str] = {}  # student_number → bb_internal_user_id
 
     # ------------------------------------------------------------------
     # Public interface
@@ -86,8 +81,6 @@ class PKUHomeworkCrawler:
         - Whitelist set → per-student: CheckWork.do + api/pdf.do (2 reqs per student)
         - No whitelist  → batch ZIP: downloadBatch.do (1 req for all files, fast)
         """
-        self._ensure_bb_user_map()
-
         resp = self.client.get(
             f"{HW_BASE}/getStudentWork.do",
             params={
@@ -122,7 +115,7 @@ class PKUHomeworkCrawler:
             if student_id not in self.whitelist:
                 continue
 
-            file_bytes, filename, content_type = self._download_student_file(
+            file_bytes, filename = self._download_student_file(
                 grade_book_pk=grade_book_pk,
                 title=title,
                 user_id=student_id,
@@ -136,10 +129,7 @@ class PKUHomeworkCrawler:
                 student_id=student_id,
                 student_name=student["name"],
                 assignment_id=grade_book_pk,
-                assignment_title=title,
-                bb_user_id=self._bb_user_map.get(student_id, ""),
-                attachments=[Attachment(filename=filename, content_type=content_type, data=file_bytes)],
-                submitted_at=student.get("submitted_at", ""),
+                attachments=[Attachment(filename=filename, data=file_bytes)],
                 already_graded=student.get("already_graded", False),
             ))
         return submissions
@@ -167,14 +157,7 @@ class PKUHomeworkCrawler:
                     student_id=student_id,
                     student_name=student["name"],
                     assignment_id=grade_book_pk,
-                    assignment_title=title,
-                    bb_user_id=self._bb_user_map.get(student_id, ""),
-                    attachments=[Attachment(
-                        filename=filename,
-                        content_type=_guess_mime(filename),
-                        data=file_bytes,
-                    )],
-                    submitted_at=student.get("submitted_at", ""),
+                    attachments=[Attachment(filename=filename, data=file_bytes)],
                     already_graded=student.get("already_graded", False),
                 ))
             return submissions
@@ -192,10 +175,10 @@ class PKUHomeworkCrawler:
 
     def _download_student_file(
         self, grade_book_pk: str, title: str, user_id: str, file_pk: str, attempt_pk: str
-    ) -> tuple[bytes | None, str, str]:
+    ) -> tuple[bytes | None, str]:
         """
         Fetch CheckWork.do to extract filePath, then download via api/pdf.do.
-        Returns (file_bytes, filename, content_type) or (None, "", "") on failure.
+        Returns (file_bytes, filename) or (None, "") on failure.
         """
         resp = self.client.get(
             f"{HW_BASE}/CheckWork.do",
@@ -212,51 +195,17 @@ class PKUHomeworkCrawler:
 
         m = _FILE_PATH_PATTERN.search(resp.text)
         if not m:
-            return None, "", ""
+            return None, ""
 
         file_path = m.group(1)
         filename = file_path.rsplit("/", 1)[-1]
-        content_type = _guess_mime(filename)
 
         # Double-encode and pass directly in URL (params= would triple-encode)
         encoded = quote(quote(file_path, safe=""), safe="")
         file_resp = self.client.get(f"{HW_BASE}/api/pdf.do?path={encoded}")
         file_resp.raise_for_status()
 
-        return file_resp.content, filename, content_type
-
-    # ------------------------------------------------------------------
-    # BB user map (for grade submission)
-    # ------------------------------------------------------------------
-
-    def _ensure_bb_user_map(self) -> None:
-        if self._bb_user_map:
-            return
-        try:
-            users = self._bb_paginate(
-                f"{BB_API}/courses/{self.course_id}/users",
-                params={"fields": "userId,user.userName"},
-            )
-            for u in users:
-                bb_uid = u.get("userId", "")
-                student_number = u.get("user", {}).get("userName", "")
-                if bb_uid and student_number:
-                    self._bb_user_map[student_number] = bb_uid
-        except httpx.HTTPStatusError:
-            pass  # non-fatal
-
-    def _bb_paginate(self, path: str, params: dict | None = None) -> list[dict]:
-        params = dict(params or {})
-        params.setdefault("limit", "200")
-        results: list[dict] = []
-        url: str | None = path
-        while url:
-            resp = self.client.get(url, params=params if url == path else None)
-            resp.raise_for_status()
-            body = resp.json()
-            results.extend(body.get("results", []))
-            url = body.get("paging", {}).get("nextPage")
-        return results
+        return file_resp.content, filename
 
 
 # ------------------------------------------------------------------
@@ -323,15 +272,3 @@ def _parse_student_list(html: str) -> list[dict]:
 
     return list(student_map.values())
 
-
-def _guess_mime(filename: str) -> str:
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    return {
-        "pdf": "application/pdf",
-        "doc": "application/msword",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "zip": "application/zip",
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "png": "image/png",
-    }.get(ext, "application/octet-stream")
