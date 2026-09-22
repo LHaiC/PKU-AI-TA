@@ -51,7 +51,7 @@ def _fetch_student_meta(client: httpx.Client, course_id: str, grade_book_pk: str
     """
     Return ({userId: {filePk, attemptPk}}, assignment_title) by parsing getStudentWork.do.
     """
-    from crawler.pku_homework import _STUDENT_ONCLICK_PATTERN, _STUDENT_PATTERN
+    from crawler.pku_homework import _parse_student_list
 
     title = _fetch_assignment_title(client, course_id, grade_book_pk)
 
@@ -62,13 +62,12 @@ def _fetch_student_meta(client: httpx.Client, course_id: str, grade_book_pk: str
     resp.raise_for_status()
     html = resp.text
 
-    meta: dict[str, dict] = {}
-    for m in _STUDENT_PATTERN.finditer(html):
-        _, user_id, file_pk, _, attempt_pk, _ = m.groups()
-        meta[user_id] = {"filePk": file_pk, "attemptPk": attempt_pk}
-    for m in _STUDENT_ONCLICK_PATTERN.finditer(html):
-        user_id, file_pk, attempt_pk, _ = m.groups()
-        meta.setdefault(user_id, {"filePk": file_pk, "attemptPk": attempt_pk})
+    # _parse_student_list already picks each student's newest attempt — the
+    # grade must land on the same attempt the decay rule treats as effective.
+    meta = {
+        s["userId"]: {"filePk": s["filePk"], "attemptPk": s["attemptPk"]}
+        for s in _parse_student_list(html)
+    }
 
     return meta, title
 
@@ -136,12 +135,17 @@ def submit_scores(
     if dry_run:
         results: list[dict] = []
         for r in approved:
+            notes = (r.reviewer_notes or "").strip()
             log(
                 f"[dim][DRY RUN][/dim] Would submit: "
                 f"{r.result.student_id} ({r.result.student_name})"
                 f" → {r.final_score:g}/{r.result.total_max:g}"
-                f"  notes: {(r.reviewer_notes or '')[:60]}"
             )
+            if notes:
+                log(f"    notes: {notes}")
+                if len(notes) > 2000:
+                    log(f"    [yellow]⚠ notes are {len(notes)} chars — "
+                        f"Blackboard payload will truncate to 2000[/yellow]")
             results.append({
                 "student_id": r.result.student_id,
                 "student_name": r.result.student_name,
