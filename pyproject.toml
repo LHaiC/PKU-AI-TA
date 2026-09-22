@@ -17,6 +17,7 @@ dependencies = [
     "python-docx>=1.2.0",
     "pymupdf>=1.27.2",
     'pyreadline3>=3.4; sys_platform == "win32"',
+    "prompt-toolkit>=3.0.53",
 ]
 
 [project.scripts]

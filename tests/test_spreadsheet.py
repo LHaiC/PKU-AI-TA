@@ -111,3 +111,47 @@ class TestSpreadsheetRoundtrip:
             assert records[0].result.breakdown[0].criterion == "Correctness"
             assert len(records[0].result.uncertain_parts) == 1
             assert records[0].result.uncertain_parts[0].description == "Unclear"
+
+    def test_export_preserves_reviewer_fields(self):
+        """Regrade must not clobber reviewer columns on unchanged rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            export([make_result()], path)
+
+            import openpyxl
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+            ws.cell(2, headers.index("reviewer_notes") + 1).value = "manual note"
+            ws.cell(2, headers.index("reviewer_override_score") + 1).value = 90.0
+            ws.cell(2, headers.index("approved") + 1).value = "YES"
+            wb.save(path)
+
+            # Same result re-exported (unchanged) → reviewer fields + approved kept
+            export([make_result()], path)
+            rec = load_reviewed(path)[0]
+            assert rec.reviewer_notes == "manual note"
+            assert rec.reviewer_override_score == 90.0
+            assert rec.approved is True
+
+    def test_export_resets_approved_when_result_changed(self):
+        """An approval applies to a specific evaluation — a changed score
+        must force re-approval, while notes/override are still kept."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            export([make_result()], path)
+
+            import openpyxl
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+            ws.cell(2, headers.index("reviewer_notes") + 1).value = "manual note"
+            ws.cell(2, headers.index("approved") + 1).value = "YES"
+            wb.save(path)
+
+            changed = make_result()
+            changed.total_score = 70.0
+            export([changed], path)
+            rec = load_reviewed(path)[0]
+            assert rec.reviewer_notes == "manual note"
+            assert rec.approved is False

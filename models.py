@@ -46,15 +46,34 @@ class ScoringResult(BaseModel):
     def pct(self) -> float:
         return round(self.total_score / self.total_max * 100, 1) if self.total_max else 0.0
 
+    def deduction_summary(self, max_chars: int = 1800) -> str:
+        """Student-facing feedback generated from the breakdown: total plus one
+        line per deducted criterion. Used to auto-fill reviewer notes, which are
+        posted to the platform as richContent (visible to the student)."""
+        lines = []
+        for b in self.breakdown:
+            lost = b.points_max - b.points_awarded
+            if lost > 0:
+                lines.append(f"- {b.criterion}（{b.points_awarded:g}/{b.points_max:g}）：{b.reasoning}")
+        head = f"得分 {self.total_score:g}/{self.total_max:g}。"
+        text = head + ("\n扣分项：\n" + "\n".join(lines) if lines else "")
+        return text[:max_chars]
+
 
 class ReviewRecord(BaseModel):
     result: ScoringResult
     reviewer_override_score: float | None = None  # None = accept LLM score
     reviewer_notes: str = ""
     approved: bool = False
+    decay_factor: float = 1.0  # late-submission multiplier; 1.0 = on time
 
     @property
-    def final_score(self) -> float:
+    def base_score(self) -> float:
+        """Pre-decay score: a human override wins over the LLM score."""
         if self.reviewer_override_score is not None:
             return self.reviewer_override_score
         return self.result.total_score
+
+    @property
+    def final_score(self) -> float:
+        return self.base_score * self.decay_factor

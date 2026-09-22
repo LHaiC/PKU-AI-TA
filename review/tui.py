@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -17,7 +18,6 @@ from rich.text import Text
 from review.tui_components import (
     find_submission_file,
     open_file,
-    auto_approve_students,
     ReviewSession,
     handle_approve,
     handle_edit,
@@ -26,7 +26,8 @@ from review.tui_components import (
 )
 
 
-def display_student(console: Console, row_data: dict, row_idx: int, total: int, breakdown: list | None = None) -> list:
+def display_student(console: Console, row_data: dict, row_idx: int, total: int,
+                    breakdown: list | None = None, progress: str = "") -> list:
     """Display student info and score breakdown using Rich. Returns the breakdown list."""
     narrow = console.width < 100
 
@@ -66,7 +67,8 @@ def display_student(console: Console, row_data: dict, row_idx: int, total: int, 
         "[bold]Reviewer notes:[/]",
         f"[green]{current_notes}[/green]" if current_notes else "[dim](none)[/dim]",
     )
-    console.print(Panel(info_table, title=f"Student {row_idx}/{total}", border_style="cyan"))
+    title = f"Student {row_idx}/{total}" + (f" · {progress}" if progress else "")
+    console.print(Panel(info_table, title=title, border_style="cyan"))
 
     if breakdown is None:
         try:
@@ -76,7 +78,8 @@ def display_student(console: Console, row_data: dict, row_idx: int, total: int, 
             console.print("[yellow]Warning: Could not parse breakdown_json[/yellow]")
 
     if breakdown:
-        bd_table = Table(title="Score Breakdown")
+        bd_table = Table(title="Score Breakdown", box=box.HORIZONTALS,
+                         show_lines=True, border_style="dim")
         bd_table.add_column("#", style="dim", justify="right")
         bd_table.add_column("Criterion", style="cyan", max_width=40 if narrow else 36,
                             overflow="fold", no_wrap=False)
@@ -108,7 +111,8 @@ def display_student(console: Console, row_data: dict, row_idx: int, total: int, 
     try:
         uncertain = json.loads(row_data.get("uncertain_parts_json", "[]"))
         if uncertain:
-            uc_table = Table(title="Uncertain Parts")
+            uc_table = Table(title="Uncertain Parts", box=box.HORIZONTALS,
+                             show_lines=True, border_style="dim")
             uc_table.add_column("Description", style="yellow", max_width=60,
                                 overflow="fold", no_wrap=False)
             uc_table.add_column("Suggested Score", justify="right")
@@ -138,7 +142,7 @@ def run_review_tui(
     rubric: Path = Path("rubric.md"),
     needs_review_only: bool = False,
     all_students: bool = False,
-    auto_approve: bool = False,
+    below: float | None = None,
 ) -> None:
     """Interactive TUI for reviewing submissions one by one."""
     if not scores.exists():
@@ -151,20 +155,13 @@ def run_review_tui(
         console.print(f"[yellow]Warning: Rubric file not found: {rubric}[/yellow]")
 
     console.print(f"[bold]Loading spreadsheet:[/bold] {scores}")
-    session = ReviewSession(scores, needs_review_only, all_students)
+    session = ReviewSession(scores, needs_review_only, all_students, below)
 
     if not session.rows:
         console.print("[yellow]No students to review with the current filters.[/yellow]")
         return
 
     console.print(f"[green]Found {len(session.rows)} student(s) to review.[/green]")
-
-    if auto_approve:
-        if auto_approve_students(session.ws, session.idx, console):
-            # Save the changes before reloading
-            session.wb.save(scores)
-            session = ReviewSession(scores, needs_review_only, all_students)
-            console.print(f"[green]{len(session.rows)} student(s) remaining to review after auto-approve.[/green]")
 
     try:
         while True:
@@ -180,7 +177,14 @@ def run_review_tui(
             except json.JSONDecodeError:
                 breakdown = []
 
-            display_student(console, row_data, i, len(session.rows), breakdown)
+            appr_col = session.idx["approved"] + 1
+            n_approved = sum(
+                1 for r in range(2, session.ws.max_row + 1)
+                if str(session.ws.cell(r, appr_col).value or "").upper() == "YES"
+            )
+            progress = f"approved {n_approved}/{session.ws.max_row - 1}"
+            display_student(console, row_data, i, len(session.rows), breakdown,
+                            progress=progress)
             student_id = str(row_data["student_id"])
             student_name = str(row_data["student_name"])
             sub_file = find_submission_file(submissions, student_id, student_name)

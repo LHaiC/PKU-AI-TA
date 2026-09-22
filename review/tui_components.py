@@ -34,26 +34,47 @@ except ImportError:
         pass
 
 
-def prompt_text(prompt_label: str, default: str = "", console: Console | None = None, allow_interrupt: bool = False) -> str:
+def prompt_text(prompt_label: str, default: str = "", console: Console | None = None,
+                allow_interrupt: bool = False, prefill: bool = False) -> str:
     """Prompt for text input using Python's built-in input() for better IME and cursor support.
 
     This is better than rich.prompt.Prompt for:
-    - Chinese/Japanese/Korean input (IME support)
+    - Chinese/Japanese/CJK input (IME support)
     - Left/right arrow keys for cursor movement
     - Proper backspace handling with multi-byte characters
+
+    With prefill=True the default is inserted into the input line itself
+    (editable in place — Enter accepts it as-is); otherwise it is shown as a
+    "(default: …)" hint and an empty input returns it.
 
     If allow_interrupt is True, KeyboardInterrupt will be raised instead of returning default.
     """
     # Print the prompt on its own line first to avoid readline cursor position issues
     if console:
         console.print(f"{prompt_label}", end="")
-        if default:
+        if default and not prefill:
             console.print(f" [dim](default: {default})[/dim]", end="")
         console.print()
     else:
-        print(f"{prompt_label}{f' (default: {default})' if default else ''}")
+        print(f"{prompt_label}{f' (default: {default})' if default and not prefill else ''}")
 
-    # Then just use a simple "> " prompt for input()
+    # Editable pre-fill via prompt_toolkit — the draft text sits in the input
+    # buffer and Enter accepts it as-is. (Plain input() can't pre-fill; the
+    # readline hooks for it don't exist on libedit, which this Python uses.)
+    if prefill:
+        try:
+            from prompt_toolkit import prompt as pt_prompt
+            result = pt_prompt("> ", default=default)
+            return result.strip()
+        except KeyboardInterrupt:
+            if allow_interrupt:
+                raise
+            return default
+        except EOFError:
+            return default
+        except Exception:
+            pass  # fall through to plain input()
+
     try:
         result = input("> ")
         return result.strip() if result.strip() != "" else default
@@ -72,9 +93,13 @@ def find_submission_file(submissions_dir: Path, student_id: str, student_name: s
     if not submissions_dir.exists():
         return None
     for assignment_dir in submissions_dir.iterdir():
-        if not assignment_dir.is_dir() or assignment_dir.name.startswith(".`"):
+        if not assignment_dir.is_dir() or assignment_dir.name.startswith((".", "_")):
             continue
         for f in assignment_dir.iterdir():
+            # Per-student dir: return its originals/ (or the dir itself)
+            if f.is_dir() and student_id in f.name:
+                orig = f / "originals"
+                return orig if orig.is_dir() else f
             if f.is_file() and not f.name.startswith(".") and student_id in f.name:
                 return f
     return None
@@ -124,27 +149,55 @@ def load_review_data(
     scores: Path,
     needs_review_only: bool,
     all_students: bool,
+    below: float | None = None,
 ) -> tuple[Any, dict, list[tuple[int, dict]]]:
-    """Load student data from scores spreadsheet and filter based on review status."""
+    """Load student data from scores spreadsheet and filter based on review status.
+
+    Filter semantics:
+    - needs_review_only: include rows with needs_review=YES OR non-empty
+      uncertain_parts OR any non-perfect score (pct < 100) — every deduction
+      must be eyeballed by a human. Derived from the row contents; the stored
+      flag alone is not trusted (old exports predate the review_below rule).
+    - below: a hard cap — only rows with pct < below pass, applied on top of
+      whatever else matched. `--needs-review --below 95` thus drops flagged
+      100-scores from the queue.
+
+    Queue order: student_id ascending, matching the on-disk submission
+    directories so locating a student's files is trivial.
+    """
     wb = openpyxl.load_workbook(scores)
     ws = wb.active
 
     headers = [cell.value for cell in ws[1]]
     idx = {name: i for i, name in enumerate(headers)}
 
+    def _pct(row_data: dict) -> float:
+        total_max = float(row_data.get("total_max") or 0)
+        score = float(row_data.get("total_score") or 0)
+        return score / total_max * 100 if total_max > 0 else 0.0
+
     rows: list[tuple[int, dict]] = []
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row[idx["student_id"]]:
             continue
         row_data = {name: row[i] if i < len(row) else None for name, i in idx.items()}
-        if needs_review_only and row_data.get("needs_review") != "YES":
+        pct = _pct(row_data)
+        uncertain_raw = str(row_data.get("uncertain_parts_json") or "").strip()
+        has_uncertain = uncertain_raw not in ("", "[]", "null")
+        if (needs_review_only and row_data.get("needs_review") != "YES"
+                and not has_uncertain and pct >= 100):
+            continue
+        if below is not None and pct >= below:
             continue
         # Skip approved students only if they don't need review for missing notes
         is_approved = str(row_data.get("approved", "")).upper() == "YES"
         if not all_students and is_approved and not needs_review_check(row_data):
             continue
         rows.append((row_idx, row_data))
-    
+
+    # Queue order: student_id ascending — matches submissions/ dir naming.
+    rows.sort(key=lambda t: str(t[1].get("student_id") or ""))
+
     return wb, idx, rows
 
 def auto_approve_students(ws: Any, idx: dict, console: Console) -> bool:
@@ -155,13 +208,14 @@ def auto_approve_students(ws: Any, idx: dict, console: Console) -> bool:
         if not row[idx["student_id"]]:
             continue
         row_data = {name: row[i] if i < len(row) else None for name, i in idx.items()}
-        # Check: 100 points, needs_review=NO, not already approved
+        # Check: 100 points, no flags/uncertainties, not already approved
         total_score = float(row_data.get("total_score", 0) or 0)
         total_max = float(row_data.get("total_max", 100) or 100)
-        needs_review = row_data.get("needs_review") == "YES"
+        flagged = (row_data.get("needs_review") == "YES"
+                   or str(row_data.get("uncertain_parts_json") or "").strip() not in ("", "[]", "null"))
         already_approved = str(row_data.get("approved", "")).upper() == "YES"
 
-        if total_score >= total_max and not needs_review and not already_approved:
+        if total_score >= total_max and not flagged and not already_approved:
             student_name = row_data.get("student_name", "")
             student_id = row_data.get("student_id", "")
             console.print(f"  [dim]Auto-approving:[/dim] {student_name} ({student_id}) — {total_score}/{total_max}")
@@ -176,9 +230,9 @@ def auto_approve_students(ws: Any, idx: dict, console: Console) -> bool:
 
 class ReviewSession:
     """Manages the state of an interactive review session."""
-    def __init__(self, scores: Path, needs_review_only: bool, all_students: bool):
+    def __init__(self, scores: Path, needs_review_only: bool, all_students: bool, below: float | None = None):
         self.scores = scores
-        self.wb, self.idx, self.rows = load_review_data(scores, needs_review_only, all_students)
+        self.wb, self.idx, self.rows = load_review_data(scores, needs_review_only, all_students, below)
         self.ws = self.wb.active
         self.current_idx = 0
         self.modified_rows: dict[int, dict] = {}
@@ -203,11 +257,64 @@ class ReviewSession:
         self.modified = True
 
     def save_changes(self):
-        if self.modified:
-            self.wb.save(self.scores)
+        """Write back ONLY the rows the reviewer touched, merged onto a fresh
+        read of the file. The session workbook may be hours stale — regrades
+        run concurrently — and wb.save() would clobber every row with old data."""
+        if not self.modified:
+            return
+        fresh = openpyxl.load_workbook(self.scores)
+        fws = fresh.active
+        fidx = {c.value: i for i, c in enumerate(fws[1])}
+        frow_of: dict[str, int] = {}
+        for r, row in enumerate(fws.iter_rows(min_row=2, values_only=True), start=2):
+            sid = row[fidx["student_id"]]
+            if sid:
+                frow_of[str(sid)] = r
+        sid_of_row = {r: str(d["student_id"]) for r, d in self.rows}
+        skipped = 0
+        for row_idx, row_data in self.modified_rows.items():
+            sid = str(row_data.get("student_id") or sid_of_row.get(row_idx, ""))
+            fr = frow_of.get(sid)
+            if fr is None:
+                skipped += 1
+                continue
+            for name, col0 in fidx.items():
+                if name in row_data:
+                    fws.cell(row=fr, column=col0 + 1, value=row_data[name])
+        fresh.save(self.scores)
+        # Keep session state consistent for any subsequent saves
+        self.wb, self.ws = fresh, fws
+        self.modified_rows.clear()
+        self.modified = False
+        if skipped:
+            print(f"[yellow]Warning: {skipped} edited row(s) not found in current file — skipped.[/yellow]")
+
+def _draft_notes(row_data: dict, current_score: float, total_max: float) -> str:
+    """Existing notes if present, else auto-generated deduction summary."""
+    existing = str(row_data.get("reviewer_notes") or "").strip()
+    if existing:
+        return existing
+    try:
+        import json as _json
+        from models import CriterionScore, ScoringResult
+        result = ScoringResult(
+            student_id=str(row_data.get("student_id", "")),
+            student_name=str(row_data.get("student_name", "")),
+            assignment_id=str(row_data.get("assignment_id", "")),
+            total_score=current_score,
+            total_max=total_max,
+            confidence=float(row_data.get("confidence") or 0),
+            breakdown=[CriterionScore(**b) for b in _json.loads(row_data.get("breakdown_json") or "[]")],
+        )
+        return result.deduction_summary()
+    except Exception:
+        return ""
+
 
 def handle_approve(session: ReviewSession, row_idx: int, row_data: dict, console: Console) -> bool:
     """Handle the 'approve' action. Returns True if approved, False if cancelled."""
+    from rich.prompt import Confirm
+
     total_max = float(row_data.get("total_max", 100) or 100)
     override_score = row_data.get("reviewer_override_score")
     if override_score is not None and override_score != "":
@@ -218,23 +325,19 @@ def handle_approve(session: ReviewSession, row_idx: int, row_data: dict, console
     else:
         current_score = float(row_data.get("total_score", 0) or 0)
     is_perfect = current_score >= total_max
-    has_notes = bool(str(row_data.get("reviewer_notes") or "").strip())
 
-    if not is_perfect and not has_notes:
-        console.print("\n[yellow]Score is not 100%. Please add reviewer notes.[/yellow]")
-        current_notes = str(row_data.get("reviewer_notes") or "")
-        try:
-            new_notes = prompt_text("[bold cyan]Enter reviewer notes[/bold cyan]", default=current_notes, console=console, allow_interrupt=True)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Approve cancelled.[/yellow]")
-            return False
-        if new_notes.strip():
-            row_data["reviewer_notes"] = new_notes
-            session.ws.cell(row=row_idx, column=session.idx["reviewer_notes"] + 1, value=new_notes)
-            has_notes = True
-            console.print("[green]Added reviewer notes.[/green]")
-        else:
-            console.print("[yellow]No notes added. You can still add notes later.[/yellow]")
+    # Reviewer notes (sent to the student as richContent) only make sense for
+    # non-perfect scores — they explain deductions. Perfect scores get none.
+    if not is_perfect:
+        draft = _draft_notes(row_data, current_score, total_max)
+        edited = prompt_text("[bold cyan]Reviewer notes[/bold cyan] [dim](编辑后回车确认，清空回车则无 notes)[/dim]",
+                             default=draft, console=console, prefill=True)
+        if not edited:
+            if not Confirm.ask("[bold cyan]No reviewer notes — approve anyway?[/bold cyan]", default=False):
+                console.print("[yellow]Cancelled — not approved.[/yellow]")
+                return False
+        row_data["reviewer_notes"] = edited
+        session.ws.cell(row=row_idx, column=session.idx["reviewer_notes"] + 1, value=edited)
 
     session.ws.cell(row=row_idx, column=session.idx["approved"] + 1, value="YES")
     row_data["approved"] = "YES"
@@ -243,11 +346,12 @@ def handle_approve(session: ReviewSession, row_idx: int, row_data: dict, console
     return True
 
 def handle_notes(session: ReviewSession, row_idx: int, row_data: dict, console: Console) -> None:
-    """Handle the 'notes' action."""
+    """Handle the 'notes' action — input line pre-filled with current notes."""
     current_notes = str(row_data.get("reviewer_notes") or "")
-    console.print(f"\n[bold]Current notes:[/bold] {current_notes if current_notes else '(none)'}")
     try:
-        new_notes = prompt_text("[bold cyan]Enter reviewer notes[/bold cyan]", default=current_notes, console=console, allow_interrupt=True)
+        new_notes = prompt_text("[bold cyan]Reviewer notes[/bold cyan] [dim](预填当前内容，编辑后回车)[/dim]",
+                                default=current_notes, console=console,
+                                allow_interrupt=True, prefill=True)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled - notes not changed.[/yellow]")
         return
@@ -301,7 +405,8 @@ def edit_breakdown(console: Console, breakdown: list) -> tuple[list, float, floa
                            border_style="magenta"))
 
         # Show current breakdown with numbers
-        bd_table = Table()
+        from rich import box
+        bd_table = Table(box=box.HORIZONTALS, show_lines=True, border_style="dim")
         bd_table.add_column("#", style="dim", justify="right")
         bd_table.add_column("Criterion", style="cyan")
         bd_table.add_column("Awarded", justify="right", style="green")

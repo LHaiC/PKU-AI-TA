@@ -43,7 +43,7 @@ def write_scores(tmp_path: Path, results: list[ScoringResult]) -> Path:
 class TestStatusCommand:
     def test_json_summary(self, tmp_path):
         scores = write_scores(tmp_path, [
-            make_result("2023001001", total_score=85.0),
+            make_result("2023001001", total_score=95.0),
             make_result("2023001002", total_score=60.0, confidence=0.4, needs_review=True),
         ])
         result = runner.invoke(app, ["status", "--scores", str(scores), "--json"])
@@ -84,11 +84,14 @@ class TestShowCommand:
 
 
 class TestApproveCommand:
-    def test_non_perfect_requires_notes(self, tmp_path):
+    def test_non_perfect_auto_fills_notes(self, tmp_path):
+        """Non-perfect approve without --notes auto-generates notes from the breakdown."""
         scores = write_scores(tmp_path, [make_result(total_score=85.0)])
         result = runner.invoke(app, ["approve", "--student", "2023001001", "--scores", str(scores)])
-        assert result.exit_code == 1
-        assert load_reviewed(scores)[0].approved is False
+        assert result.exit_code == 0
+        record = load_reviewed(scores)[0]
+        assert record.approved is True
+        assert record.reviewer_notes and "85" in record.reviewer_notes
 
     def test_approve_with_notes(self, tmp_path):
         scores = write_scores(tmp_path, [make_result(total_score=85.0)])
