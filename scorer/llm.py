@@ -255,18 +255,25 @@ def score_submission(submission: Submission, rubric: str, prompt: Path = _DEFAUL
         for b in data.get("breakdown", [])
     ]
     confidence = _f(data.get("confidence"), 1.0)
+    total = _f(data.get("total_score"))
+    total_max = _f(data.get("total_max"))
+    pct = total / total_max * 100 if total_max else 0.0
 
     return ScoringResult(
         student_id=submission.student_id,
         student_name=submission.student_name,
         assignment_id=submission.assignment_id,
-        total_score=_f(data.get("total_score")),
-        total_max=_f(data.get("total_max")),
+        total_score=total,
+        total_max=total_max,
         breakdown=breakdown,
         uncertain_parts=uncertain,
         confidence=confidence,
         llm_reasoning=data.get("llm_reasoning", ""),
-        needs_review=confidence < settings.review_threshold or len(uncertain) > 0,
+        needs_review=(
+            confidence < settings.review_threshold
+            or len(uncertain) > 0
+            or pct < settings.review_below
+        ),
     )
 
 

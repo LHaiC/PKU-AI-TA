@@ -7,12 +7,12 @@ from scorer.llm import _parse_json, _extract_text, score_submission
 
 
 VALID_LLM_RESPONSE = {
-    "total_score": 85.0,
+    "total_score": 95.0,
     "total_max": 100.0,
     "confidence": 0.9,
     "breakdown": [
-        {"criterion": "Correctness", "points_awarded": 40.0, "points_max": 50.0, "reasoning": "Mostly correct."},
-        {"criterion": "Style", "points_awarded": 45.0, "points_max": 50.0, "reasoning": "Clean code."},
+        {"criterion": "Correctness", "points_awarded": 45.0, "points_max": 50.0, "reasoning": "Mostly correct."},
+        {"criterion": "Style", "points_awarded": 50.0, "points_max": 50.0, "reasoning": "Clean code."},
     ],
     "uncertain_parts": [],
     "llm_reasoning": "Good overall submission.",
@@ -23,7 +23,7 @@ class TestParseJson:
     def test_clean_json(self):
         raw = json.dumps(VALID_LLM_RESPONSE)
         result = _parse_json(raw)
-        assert result["total_score"] == 85.0
+        assert result["total_score"] == 95.0
 
     def test_strips_markdown_fences(self):
         raw = f"```json\n{json.dumps(VALID_LLM_RESPONSE)}\n```"
@@ -38,7 +38,7 @@ class TestParseJson:
     def test_extracts_json_from_surrounding_text(self):
         raw = f"Here is the score:\n{json.dumps(VALID_LLM_RESPONSE)}\nEnd."
         result = _parse_json(raw)
-        assert result["total_score"] == 85.0
+        assert result["total_score"] == 95.0
 
     def test_raises_on_invalid_json(self):
         with pytest.raises((ValueError, Exception)):
@@ -87,7 +87,7 @@ class TestScoreSubmission:
         result = score_submission(self._make_submission(), rubric="Grade on correctness (50pts) and style (50pts).")
 
         assert result.student_id == "2100012345"
-        assert result.total_score == 85.0
+        assert result.total_score == 95.0
         assert result.total_max == 100.0
         assert len(result.breakdown) == 2
         assert result.needs_review is False  # confidence=0.9 > threshold=0.75
