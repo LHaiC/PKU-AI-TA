@@ -1,102 +1,94 @@
 # PKU AI Teaching Assistant
 
-Automatically grade student homework submissions from
-[course.pku.edu.cn](https://course.pku.edu.cn) (Blackboard Learn) using an LLM,
-export results to Excel for human review, and push approved scores back to the
-platform.
+Grade homework submissions from [course.pku.edu.cn](https://course.pku.edu.cn)
+(Blackboard) with an LLM or an agentic CLI, review them in an interactive TUI,
+apply late-submission penalties, and push approved scores back to the platform.
 
-**Pipeline:** crawl submissions → LLM scores against your rubric → human review → submit approved scores
+**Pipeline:** `grade` → `review`/`approve` → `decay` → `submit`
 
-## Features
+## Install
 
-- **Agent-driven or manual** — run the whole pipeline from opencode / Codex /
-  commandcode via the bundled skill, or type the commands yourself
-- **LLM scoring** through any OpenAI-compatible API (OpenRouter by default)
-- **Handles PDFs, Word docs, and scanned/image submissions** (vision fallback)
-- **Interactive TUI review** with per-criterion editing, overrides, and notes;
-  plus non-interactive `status` / `show` / `approve` for scripts and agents
-- **Crash-safe** — progress is checkpointed to the spreadsheet; resume anytime
-- **English and Chinese** grading prompts
-
-## Requirements
-
-- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- An [OpenRouter](https://openrouter.ai) API key (or any OpenAI-compatible endpoint)
-- PKU IAAA credentials (student/staff ID + password)
-
-## Quick start
+Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), PKU IAAA
+credentials.
 
 ```bash
 git clone <repo-url> && cd PKU-AI-TA
 uv sync --extra dev
-cp .env.example .env        # fill in API key, PKU credentials, COURSE_ID
-# create rubric.md describing the scoring criteria
-# optional: student_list with one student ID per line
+cp .env.example .env          # PKU_USERNAME / PKU_PASSWORD / COURSE_ID
+cp .ddl_rule.example .ddl_rule  # optional: late-penalty rule
 ```
 
-### With an AI agent CLI (recommended)
+Scoring engine — pick one (`ta engines` lists what's installed):
 
-Open this repository in opencode, Codex, or commandcode and ask:
+- **Agentic CLI** (no API key): `TA_CLI_ENGINE=devin|claude|codex|opencode|cmdc`.
+  `TA_CLI_MODEL` / `TA_CLI_EFFORT` map onto each CLI's own flags
+  (devin `--model`; claude `--model`/`--effort`; codex `-m`/`-c
+  model_reasoning_effort`; opencode `-m`/`--variant`; cmdc `-m`/`--effort`) —
+  empty means the CLI's default. Or set
+  `TA_GRADER_CMD='mycmd --model x {prompt_file}'` for full control (must
+  print the scoring JSON on stdout).
+- **OpenAI-compatible API**: `TA_CLI_ENGINE=api` + `OPENAI_API_KEY`
+  (OpenRouter by default; override with `OPENAI_BASE_URL`/`TA_MODEL`).
 
-> Grade Homework 1 for the students in student_list and tell me what needs my
-> attention.
+## With an agent CLI (recommended)
 
-The agent reads `.agents/skills/pku-ta/SKILL.md` and drives
-`assignments → grade → status → approve` for you. It will never run a real
-submission; it prints the final `ta submit` command for you to run yourself.
+This repo ships a skill at `.agents/skills/pku-ta/SKILL.md`. Open the
+repository in Codex / Devin / Claude Code / opencode and ask e.g.
+"grade Lab 1 and tell me what needs my attention" — the agent drives the whole
+pipeline and hands you the final `submit` command to run yourself. It will
+never submit or approve on its own. Details: [docs/agent-integration.md](docs/agent-integration.md).
 
-### Manually
+## Manually
+
+Each assignment lives in a workdir outside the repo holding `scores.xlsx`,
+`rubric.md`, `submissions/`, `meta.json` (course/column/deadline, written by
+`grade`) — point `--scores` at it and everything resolves inside.
 
 ```bash
-# 1. Find the assignment ID (gradeBookPK)
+# 0. Find the assignment's gradeBookPK
 uv run python main.py assignments --course _98024_1
 
-# 2. Grade with the LLM
-uv run python main.py grade --course _98024_1 --column 423829 --rubric rubric.md
+# 1. Crawl + grade (checkpoints after every student; --resume if interrupted)
+uv run python main.py grade --course _98024_1 --column 423829 --out ../Lab1/scores.xlsx
 
-# 3. Review (TUI), or try it without credentials: review --demo
-uv run python main.py review --needs-review
+# 2. Review: batch-approve clean 100s, then TUI for the rest
+uv run python main.py approve --scores ../Lab1/scores.xlsx --auto-perfect
+uv run python main.py review  --scores ../Lab1/scores.xlsx --needs-review
 
-# 4. Preview the submission, then run it yourself without --dry-run
-uv run python main.py submit --course _98024_1 --column 423829 --scores scores.xlsx --dry-run
+# 3. Late-penalty decay (in place; idempotent; skip if no rule)
+uv run python main.py decay --scores ../Lab1/scores.xlsx
+
+# 4. Preview, then run the real submission yourself
+uv run python main.py submit --scores ../Lab1/scores.xlsx --dry-run
 ```
+
+`--course`/`--column`/`--due` are only needed for `grade` (or to override);
+`decay` and `submit` read them from `meta.json`.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
 | `assignments` | List assignments and their `gradeBookPK` (`--column`) values |
-| `grade` | Crawl submissions, score with the LLM, export `scores.xlsx` |
-| `review` | Interactive TUI for reviewing students one by one (`--demo` included) |
-| `status` | Summarise progress; `--json` for machine-readable output |
-| `show` | Full detail for one student; `--json` for machine-readable output |
-| `approve` | Record a human review decision without the TUI |
-| `submit` | Post approved grades; always preview with `--dry-run` first |
+| `grade` | Crawl submissions, score, export `scores.xlsx` |
+| `status` / `show` | Progress summary / one student's detail (`--json`) |
+| `review` | Interactive TUI (`--needs-review`, `--below`, `--demo`) |
+| `approve` | Record a decision without the TUI (`--auto-perfect`, `--revoke`) |
+| `decay` | Apply the `.ddl_rule` late penalty in place |
+| `submit` | Post approved grades; preview with `--dry-run` first |
 
-Full flag reference: [docs/usage.md](docs/usage.md).
-
-## Documentation
-
-| Doc | Contents |
-|---|---|
-| [finding-ids.md](docs/finding-ids.md) | How to find the course ID and `gradeBookPK` |
-| [usage.md](docs/usage.md) | Every command and flag, configuration, prompts |
-| [tui.md](docs/tui.md) | TUI guide, key bindings, screenshot |
-| [agent-integration.md](docs/agent-integration.md) | Driving the TA from opencode / Codex / commandcode |
-| [windows.md](docs/windows.md) | Windows setup, PowerShell examples, FAQ |
-| [how-it-works.md](docs/how-it-works.md) | Architecture, file handling, safety model |
-| [development.md](docs/development.md) | Tests, layout, regenerating the TUI preview |
+Full flag reference: [docs/usage.md](docs/usage.md) · TUI keys:
+[docs/tui.md](docs/tui.md) · internals: [docs/how-it-works.md](docs/how-it-works.md)
 
 ## Hard rules
 
-1. **Never run `ta submit` without `--dry-run`.** Real grade submission is human-only.
+1. **Never run `ta submit` without `--dry-run`** — real submission is human-only.
 2. **Never approve a record without explicit confirmation** from the teacher.
 3. **Never read, print, or commit `.env`** or any credential.
-4. Every deduction must have an explicit reason; never invent rubric criteria.
+4. Every deduction needs an explicit reason; never invent rubric criteria.
 
 ## Development
 
 ```bash
-uv sync --extra dev
 uv run pytest tests/ -v
 ```

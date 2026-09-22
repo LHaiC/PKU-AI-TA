@@ -113,17 +113,55 @@ def assignments(
 
 
 @app.command()
+def engines() -> None:
+    """List scoring engines and which agentic CLIs are installed on this machine."""
+    settings = _load_settings()
+    from scorer.cli_scorer import cli_engines_on_path
+
+    table = Table(title="Scoring engines")
+    table.add_column("Engine", style="cyan")
+    table.add_column("Status")
+    table.add_column("Notes", style="dim")
+
+    configured = (settings.ta_cli_engine or "api").lower()
+    api_ok = bool(settings.openai_api_key)
+    table.add_row(
+        "api" + (" ←configured" if configured == "api" else ""),
+        "[green]ready[/green]" if api_ok else "[yellow]missing OPENAI_API_KEY[/yellow]",
+        f"OpenAI-compatible endpoint ({settings.openai_base_url})",
+    )
+    opts = ", ".join(
+        f"{k}={v}" for k, v in
+        (("model", settings.ta_cli_model), ("effort", settings.ta_cli_effort))
+        if v
+    ) or "defaults"
+    for name, path in cli_engines_on_path().items():
+        table.add_row(
+            name + (" ←configured" if configured == name else ""),
+            f"[green]{path}[/green]" if path else "[red]not on PATH[/red]",
+            f"agentic CLI ({opts})",
+        )
+    if settings.grader_cmd:
+        table.add_row("TA_GRADER_CMD", "[green]custom[/green]", settings.grader_cmd)
+    console.print(table)
+    console.print("[dim]Select with --engine or TA_CLI_ENGINE in .env; "
+                  "TA_CLI_MODEL/TA_CLI_EFFORT tune it; TA_GRADER_CMD overrides "
+                  "everything.[/dim]")
+
+
+@app.command()
 def grade(
     course: Annotated[str, typer.Option(help="Blackboard course ID, e.g. _12345_1")] = "",
     column: Annotated[str, typer.Option(help="Gradebook column (assignment) ID")] = "",
-    rubric: Annotated[Path, typer.Option(help="Path to rubric file (any format the LLM supports)")] = Path("rubric.md"),
+    rubric: Annotated[Optional[Path], typer.Option(help="Path to rubric file; default: <out dir>/rubric.md")] = None,
     whitelist: Annotated[str, typer.Option(help="Comma-separated student IDs to include; empty = all")] = "",
-    out: Annotated[Path, typer.Option(help="Output Excel path")] = Path("scores.xlsx"),
-    save_dir: Annotated[Optional[Path], typer.Option(help="Save submission files here for human review; default: submissions/")] = Path("submissions"),
+    out: Annotated[Path, typer.Option(help="Output Excel path; its directory is the assignment workdir")] = Path("scores.xlsx"),
+    save_dir: Annotated[Optional[Path], typer.Option(help="Save submission files here; default: <out dir>/submissions/")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show intermediate scores for each student")] = False,
     resume: Annotated[bool, typer.Option("--resume", "-r", help="Resume from previous partial run (if any)")] = False,
     regrade_unapproved: Annotated[bool, typer.Option("--regrade-unapproved", help="Keep approved students, only regrade those not approved")] = False,
-    prompt: Annotated[Path, typer.Option(help="System prompt file for the LLM (default: prompts/system_en.md)")] = Path("prompts/system_en.md"),
+    prompt: Annotated[Optional[Path], typer.Option(help="System prompt file; default: <out dir>/prompt_zh.md or prompt.md if present, else prompts/system_en.md")] = None,
+    engine: Annotated[str, typer.Option(help="Scoring engine: api, devin, claude, codex, opencode, cmdc. Env: TA_CLI_ENGINE")] = "",
 ) -> None:
     """Crawl submissions, score with LLM, export review spreadsheet.
 
@@ -137,11 +175,45 @@ def grade(
 
     settings = _load_settings()
 
+    # Workdir convention: everything lives beside the --out spreadsheet.
+    if rubric is None:
+        rubric = out.parent / "rubric.md"
+    if save_dir is None:
+        save_dir = out.parent / "submissions"
+    if prompt is None:
+        prompt = next(
+            (p for p in (out.parent / "prompt_zh.md", out.parent / "prompt.md") if p.exists()),
+            Path("prompts/system_en.md"),
+        )
+
     from auth.iaaa import get_session
     from crawler.pku_homework import PKUHomeworkCrawler
     from review.spreadsheet import export
-    from scorer.llm import score_submission
     from models import ScoringResult
+
+    engine_name = (engine or settings.ta_cli_engine or "api").lower()
+    if engine_name == "api":
+        if not settings.openai_api_key:
+            console.print(
+                "[red]Error:[/red] --engine api requires OPENAI_API_KEY in .env. "
+                "Use --engine devin/claude/codex/opencode/cmdc to grade with an agentic CLI instead."
+            )
+            raise typer.Exit(1)
+        from scorer.llm import score_submission
+    elif not save_dir:
+        console.print("[red]Error:[/red] CLI engines need --save-dir to read submission files from disk.")
+        raise typer.Exit(1)
+    elif not settings.grader_cmd:
+        # Preset CLI engine: fail early if it's unknown or not installed.
+        from scorer.cli_scorer import _ENGINES, cli_engines_on_path
+        if engine_name not in _ENGINES:
+            console.print(f"[red]Error:[/red] unknown engine {engine_name!r} "
+                          f"(api, {', '.join(_ENGINES)}; or set TA_GRADER_CMD)")
+            raise typer.Exit(1)
+        if not cli_engines_on_path().get(engine_name):
+            console.print(f"[red]Error:[/red] '{engine_name}' CLI not found on PATH — "
+                          "run `ta engines` to see what's installed")
+            raise typer.Exit(1)
 
     # Checkpoint save/load using Excel format
     checkpoint_path = out
@@ -156,62 +228,52 @@ def grade(
                 export(all_results, checkpoint_path)
 
     def load_checkpoint() -> tuple[list[ScoringResult], set[str]]:
-        """Load previous progress from output Excel file (if exists and --resume or --regrade-unapproved is set)."""
-        if (resume or regrade_unapproved) and checkpoint_path.exists():
+        """Load previous progress from output Excel file for --resume."""
+        if resume and checkpoint_path.exists():
             try:
                 from review.spreadsheet import load_reviewed
                 records = load_reviewed(checkpoint_path)
-
-                if regrade_unapproved:
-                    # Keep only approved students, others will be regraded
-                    approved_results = [r.result for r in records if r.approved]
-                    all_results_loaded = [r.result for r in records]
-                    console.print(f"[bold cyan]Regrade mode:[/bold cyan] Loaded {len(all_results_loaded)} total, keeping {len(approved_results)} already-approved")
-                    return approved_results, {r.student_id for r in approved_results}
-                else:
-                    # Normal resume: keep all previously processed
-                    results = [r.result for r in records]
-                    console.print(f"[bold cyan]Resuming from checkpoint:[/bold cyan] {len(results)} previously processed result(s)")
-                    return results, {r.student_id for r in results}
+                results = [r.result for r in records]
+                console.print(f"[bold cyan]Resuming from checkpoint:[/bold cyan] {len(results)} previously processed result(s)")
+                return results, {r.student_id for r in results}
             except Exception as e:
                 console.print(f"[yellow]Warning: Could not load checkpoint: {e}[/yellow]")
         return [], set()
 
-    # Load checkpoint if resuming or regrading unapproved
-    unapproved_student_ids: set[str] = set()
-    if resume or regrade_unapproved:
-        all_results, processed_ids = load_checkpoint()
-        if regrade_unapproved and checkpoint_path.exists():
-            # For --regrade-unapproved, find students who are NOT approved
-            # These are the ones we need to regrade
-            try:
-                from review.spreadsheet import load_reviewed
-                all_records = load_reviewed(checkpoint_path)
-                unapproved_student_ids = {r.result.student_id for r in all_records if not r.approved}
-                console.print(f"[bold cyan]Regrade mode:[/bold cyan] Found {len(unapproved_student_ids)} unapproved student(s) to regrade")
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not determine unapproved students: {e}[/yellow]")
+    cli_whitelist: set[str] = (
+        {s.strip() for s in whitelist.split(",") if s.strip()} if whitelist else set()
+    )
+
+    if regrade_unapproved and checkpoint_path.exists():
+        # Regrade = redo a target set while KEEPING every other record.
+        # Targets: all unapproved records, narrowed by --whitelist if given.
+        try:
+            from review.spreadsheet import load_reviewed
+            all_records = load_reviewed(checkpoint_path)
+            approved_ids = {r.result.student_id for r in all_records if r.approved}
+            unapproved_ids = {r.result.student_id for r in all_records if not r.approved}
+            # An explicit --whitelist names exactly who to regrade — approved
+            # or not. Without one, default to all unapproved records.
+            targets = cli_whitelist if cli_whitelist else (unapproved_ids - approved_ids)
+            all_results = [r.result for r in all_records if r.result.student_id not in targets]
+            processed_ids = {r.student_id for r in all_results}
+            whitelist_ids = targets
+            console.print(f"[bold cyan]Regrade mode:[/bold cyan] keeping {len(all_results)} result(s), regrading {len(targets)} student(s)")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not determine unapproved students: {e}[/yellow]")
+            whitelist_ids = cli_whitelist or settings.whitelist_ids
     else:
-        all_results = []
-        processed_ids = set()
+        if resume:
+            all_results, processed_ids = load_checkpoint()
+        else:
+            all_results, processed_ids = [], set()
+        whitelist_ids = cli_whitelist or settings.whitelist_ids
 
     # Resolve config — CLI args override .env
     course_id = course or settings.course_id
     if not course_id:
         console.print("[red]Error:[/red] --course is required (or set COURSE_ID in .env)")
         raise typer.Exit(1)
-
-    # Determine whitelist:
-    # - If --regrade-unapproved: only regrade unapproved students
-    # - Else: use CLI whitelist or settings whitelist
-    if regrade_unapproved and unapproved_student_ids:
-        whitelist_ids: set[str] = unapproved_student_ids
-    else:
-        whitelist_ids: set[str] = (
-            {s.strip() for s in whitelist.split(",") if s.strip()}
-            if whitelist
-            else settings.whitelist_ids
-        )
 
     if not rubric.exists():
         console.print(f"[red]Error:[/red] Rubric file not found: {rubric}")
@@ -224,13 +286,16 @@ def grade(
 
     crawler = PKUHomeworkCrawler(client, course_id, whitelist_ids)
 
+    console.print("[bold]Step 1b:[/bold] Fetching assignment list…")
+    columns = crawler.fetch_assignments()
     if column:
-        # column here is expected to be gradeBookPK (numeric), e.g. "423829"
-        columns = [{"gradeBookPK": column, "name": column, "id": f"_{column}_1"}]
-    else:
-        console.print("[bold]Step 1b:[/bold] Fetching assignment list…")
-        columns = crawler.fetch_assignments()
-        console.print(f"  Found {len(columns)} assignment(s).")
+        # --column is a gradeBookPK (numeric); resolve its real title —
+        # getStudentWork.do needs the actual assignment name, not the PK.
+        columns = [c for c in columns if str(c.get("gradeBookPK")) == str(column)]
+        if not columns:
+            console.print(f"[red]Error:[/red] gradeBookPK {column} not found in course {course_id}")
+            raise typer.Exit(1)
+    console.print(f"  Found {len(columns)} assignment(s) to process.")
 
     start_time = time()
 
@@ -239,6 +304,16 @@ def grade(
             grade_book_pk = col.get("gradeBookPK") or col["id"].strip("_").split("_")[0]
             col_title = col.get("name") or col["id"]
             console.print(f"\n[bold]Step 2/3:[/bold] Fetching submissions for [cyan]{col_title}[/cyan]…")
+
+            # Pin the assignment's coordinates + deadline beside the scores
+            # file so decay/submit don't need them re-passed.
+            from workdir import save_meta
+            due_dt = crawler.fetch_due_date(grade_book_pk)
+            save_meta(out.parent, course_id=course_id, column=grade_book_pk,
+                      title=col_title,
+                      due=due_dt.strftime("%Y-%m-%d %H:%M:%S") if due_dt else "")
+            if due_dt:
+                console.print(f"  Deadline: [cyan]{due_dt:%Y-%m-%d %H:%M}[/cyan] (cached to meta.json)")
 
             submissions = crawler.fetch_submissions(grade_book_pk, col_title)
             if not submissions:
@@ -264,12 +339,23 @@ def grade(
                     continue
                 console.print(f"  {len(submissions)} submission(s) remaining to process")
 
+            files_map: dict[str, list[Path]] = {}
             if save_dir:
-                _save_submissions(submissions, save_dir, col_title)
+                files_map = _save_submissions(submissions, save_dir, col_title)
                 console.print(f"  Saved files → [cyan]{save_dir / col_title}[/cyan]")
 
+            if engine_name == "api":
+                def score_fn(sub):
+                    return score_submission(sub, rubric_text, prompt)
+            else:
+                from scorer.cli_scorer import make_cli_scorer
+                score_fn = make_cli_scorer(
+                    engine_name, rubric_text, prompt, files_map,
+                    prompts_dir=save_dir / "_grader_prompts",
+                )
+
             total_submissions = len(submissions)
-            console.print(f"  Scoring {total_submissions} submission(s) with LLM (threads={settings.ta_threads}, prompt={prompt.name})…")
+            console.print(f"  Scoring {total_submissions} submission(s) via {engine_name} (threads={settings.ta_threads}, prompt={prompt.name})…")
             console.print(f"  [dim]Press Ctrl-C to interrupt — progress will be saved[/dim]")
 
             # Use transient=False for verbose mode so results stay on screen
@@ -286,7 +372,7 @@ def grade(
                 completed_count = 0
 
                 with ThreadPoolExecutor(max_workers=settings.ta_threads) as executor:
-                    futures = {executor.submit(score_submission, sub, rubric_text, prompt): sub for sub in submissions}
+                    futures = {executor.submit(score_fn, sub): sub for sub in submissions}
                     for future in as_completed(futures):
                         sub = futures[future]
                         try:
@@ -371,9 +457,12 @@ def submit(
     from review.spreadsheet import load_reviewed
     from submitter.blackboard import submit_scores
 
-    course_id = course or settings.course_id
+    from workdir import load_meta
+    meta = load_meta(scores.parent)
+    course_id = course or meta.get("course_id") or settings.course_id
+    column = column or str(meta.get("column") or "")
     if not course_id or not column:
-        message = "Both --course and --column are required."
+        message = "Both --course and --column are required (or run grade first to write meta.json)."
         if json_output:
             typer.echo(json.dumps({"error": message}))
         else:
@@ -424,12 +513,12 @@ def submit(
 
 @app.command()
 def review(
-    scores: Annotated[Path, typer.Option(help="Excel spreadsheet to review")] = Path("scores.xlsx"),
-    submissions: Annotated[Path, typer.Option(help="Directory with submission files")] = Path("submissions"),
-    rubric: Annotated[Path, typer.Option(help="Path to rubric file to open during review")] = Path("rubric.md"),
-    needs_review_only: Annotated[bool, typer.Option("--needs-review", "-n", help="Only review students marked needs_review=YES")] = False,
+    scores: Annotated[Path, typer.Option(help="Excel spreadsheet to review; its directory is the workdir")] = Path("scores.xlsx"),
+    submissions: Annotated[Optional[Path], typer.Option(help="Directory with submission files; default: <scores dir>/submissions")] = None,
+    rubric: Annotated[Optional[Path], typer.Option(help="Rubric file to open during review; default: <scores dir>/rubric.md")] = None,
+    needs_review_only: Annotated[bool, typer.Option("--needs-review", "-n", help="Only review flagged/uncertain/non-perfect students")] = False,
     all_students: Annotated[bool, typer.Option("--all", "-a", help="Review all students (including already approved)")] = False,
-    auto_approve: Annotated[bool, typer.Option("--auto-approve", help="Auto-approve 100-point submissions that don't need review")] = False,
+    below: Annotated[float | None, typer.Option("--below", help="Hard cap: only review scores below this percent")] = None,
     demo: Annotated[bool, typer.Option("--demo", help="Use bundled sample data (no login or API key required)")] = False,
 ) -> None:
     """Interactive TUI for reviewing submissions one by one.
@@ -437,7 +526,7 @@ def review(
     Shows score breakdown, opens submission file, and lets you approve or override scores.
     Press 'e' to edit individual criterion scores, 'r' to open the rubric, 'b' to go back.
 
-    Use --auto-approve to automatically approve students with 100/100 and needs_review=NO.
+    Use `approve --auto-perfect` to batch-approve clean 100/100 submissions.
     Use --demo to try the interface with sample data.
     """
     from review.tui import run_review_tui
@@ -448,6 +537,12 @@ def review(
         scores, submissions, rubric = create_demo_workspace()
         console.print(f"[bold cyan]Demo mode:[/bold cyan] sample data created in {scores.parent}")
         console.print("[dim]Nothing here touches the real course — quit at any time with 'q'.[/dim]")
+    else:
+        # Workdir convention: related files live beside the scores spreadsheet.
+        if submissions is None:
+            submissions = scores.parent / "submissions"
+        if rubric is None:
+            rubric = scores.parent / "rubric.md"
 
     try:
         run_review_tui(
@@ -457,7 +552,7 @@ def review(
             rubric=rubric,
             needs_review_only=needs_review_only,
             all_students=all_students,
-            auto_approve=auto_approve,
+            below=below,
         )
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -560,7 +655,7 @@ def status(
 def show(
     student: Annotated[str, typer.Option("--student", help="Student ID to inspect (single ID)")] = "",
     scores: Annotated[Path, typer.Option(help="Excel spreadsheet to inspect")] = Path("scores.xlsx"),
-    submissions: Annotated[Path, typer.Option(help="Directory with saved submission files")] = Path("submissions"),
+    submissions: Annotated[Optional[Path], typer.Option(help="Directory with saved submission files; default: <scores dir>/submissions")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
 ) -> None:
     """Show the full scoring detail for one student: breakdown, flags, reasoning, files."""
@@ -573,6 +668,8 @@ def show(
     if not scores.exists():
         console.print(f"[red]Error:[/red] Scores file not found: {scores}")
         raise typer.Exit(1)
+    if submissions is None:
+        submissions = scores.parent / "submissions"
 
     records = [r for r in load_reviewed(scores) if r.result.student_id == student]
     if not records:
@@ -746,18 +843,39 @@ def approve(
         else:
             effective_score = float(row_data.get("total_score") or 0)
 
+        auto_notes = ""
         if effective_score < total_max and not existing_notes and not notes.strip() and not force:
-            changes.append({
-                "student_id": sid,
-                "ok": False,
-                "error": "non-perfect score requires --notes (or --force)",
-            })
-            continue
+            # Auto-fill notes from the scoring breakdown — they are posted to
+            # the platform as student-facing feedback (richContent).
+            try:
+                import json as _json
+                from models import CriterionScore, ScoringResult
+                res = ScoringResult(
+                    student_id=sid,
+                    student_name=str(row_data.get("student_name", "")),
+                    assignment_id=str(row_data.get("assignment_id", "")),
+                    total_score=effective_score,
+                    total_max=total_max,
+                    confidence=float(row_data.get("confidence") or 0),
+                    breakdown=[CriterionScore(**b) for b in _json.loads(row_data.get("breakdown_json") or "[]")],
+                )
+                auto_notes = res.deduction_summary()
+            except Exception:
+                auto_notes = ""
+            if not auto_notes:
+                changes.append({
+                    "student_id": sid,
+                    "ok": False,
+                    "error": "non-perfect score requires --notes (or --force)",
+                })
+                continue
 
         if score is not None:
             ws.cell(row=row_idx, column=idx["reviewer_override_score"] + 1, value=score)
         if notes.strip():
             ws.cell(row=row_idx, column=idx["reviewer_notes"] + 1, value=notes.strip())
+        elif auto_notes:
+            ws.cell(row=row_idx, column=idx["reviewer_notes"] + 1, value=auto_notes)
         ws.cell(row=row_idx, column=idx["approved"] + 1, value="YES")
         changes.append({"student_id": sid, "ok": True, "approved": True, "final_score": effective_score})
         modified = True
@@ -792,19 +910,240 @@ def approve(
         raise typer.Exit(1)
 
 
-def _save_submissions(submissions: list, save_dir: Path, assignment_title: str) -> None:
-    """Save each student's attachment file to save_dir/assignment_title/ for human review."""
+@app.command()
+def decay(
+    scores: Annotated[Path, typer.Option(help="Reviewed Excel spreadsheet; decay columns are written into it in place")] = Path("scores.xlsx"),
+    course: Annotated[str, typer.Option(help="Blackboard course ID; default: meta.json")] = "",
+    column: Annotated[str, typer.Option(help="Gradebook column (gradeBookPK); default: meta.json")] = "",
+    due: Annotated[str, typer.Option(help="Deadline override, e.g. '2026-09-16 23:59'; default: meta.json, else auto-fetched")] = "",
+    rule: Annotated[Optional[Path], typer.Option(help="Late-penalty rule file; default: <scores dir>/.ddl_rule, else ./.ddl_rule")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
+) -> None:
+    """Apply the late-submission decay rule, annotating the scores file in place.
+
+    Fetches each student's submission timestamp from Blackboard, applies the
+    scaling tiers from the rule file, and writes submitted_at / hours_late /
+    decay_factor / decay_reason columns. Downstream, final_score =
+    (reviewer_override or LLM score) × decay_factor, so `ta submit` reads the
+    same file — there is no separate "final" spreadsheet to keep in sync.
+
+    Idempotent: re-running recomputes factors and refreshes the 迟交扣分 note
+    rather than stacking duplicates. Rows with factor < 1 are listed for
+    manual verification.
+    """
+    settings = _load_settings(json_output)
+    from workdir import load_meta, save_meta
+
+    meta = load_meta(scores.parent)
+
+    if rule is None:
+        rule = scores.parent / ".ddl_rule"
+        if not rule.exists():
+            rule = Path(".ddl_rule")
+    if not rule.exists():
+        console.print(f"[red]Error:[/red] Rule file not found: {rule} "
+                      "(copy .ddl_rule.example and edit it)")
+        raise typer.Exit(1)
+    if not scores.exists():
+        console.print(f"[red]Error:[/red] Scores file not found: {scores}")
+        raise typer.Exit(1)
+
+    from datetime import datetime
+    from review.decay import parse_rule, parse_time, compute_decay
+    try:
+        buckets = parse_rule(rule)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    course_id = course or meta.get("course_id") or settings.course_id
+    column = column or str(meta.get("column") or "")
+    if not course_id or not column:
+        console.print("[red]Error:[/red] --course and --column are required "
+                      "(or run `grade` first to write meta.json)")
+        raise typer.Exit(1)
+
+    from auth.iaaa import get_session
+    from crawler.pku_homework import PKUHomeworkCrawler, HW_BASE, _parse_student_list
+    from review.spreadsheet import load_reviewed
+
+    console.print("[bold]Fetching submission times…[/bold]")
+    client = get_session()
+    crawler = PKUHomeworkCrawler(client, course_id, set())
+    columns = crawler.fetch_assignments()
+    col = next((c for c in columns if str(c.get("gradeBookPK")) == str(column)), None)
+    if col is None:
+        console.print(f"[red]Error:[/red] gradeBookPK {column} not found")
+        raise typer.Exit(1)
+    save_meta(scores.parent, course_id=course_id, column=str(column), title=col["name"])
+
+    # Due date: --due flag > meta.json > legacy due.txt > gradebook REST API.
+    # Resolved values are cached to meta.json so the deadline stays pinned
+    # even if the column is edited later.
+    due_dt = parse_time(due) if due else None
+    due_source = "--due" if due_dt else ""
+    if due_dt is None and meta.get("due"):
+        due_dt = parse_time(str(meta["due"]))
+        due_source = "meta.json"
+    if due_dt is None:
+        legacy_due = scores.parent / "due.txt"
+        if legacy_due.exists():
+            due_dt = parse_time(legacy_due.read_text().strip())
+            due_source = str(legacy_due)
+    if due_dt is None:
+        due_dt = crawler.fetch_due_date(str(column))
+        due_source = "gradebook REST API"
+        if due_dt is None:
+            console.print("[red]Error:[/red] could not determine the deadline — "
+                          "pass --due 'YYYY-MM-DD HH:MM'")
+            raise typer.Exit(1)
+    save_meta(scores.parent, due=due_dt.strftime("%Y-%m-%d %H:%M:%S"))
+    console.print(f"[bold]Deadline:[/bold] {due_dt:%Y-%m-%d %H:%M} ({due_source})")
+
+    text = client.get(f"{HW_BASE}/getStudentWork.do", params={
+        "course_id": course_id, "gradeBookPK": str(column),
+        "title": col["name"], "showAll": "true",
+    }).text
+    students = _parse_student_list(text)
+    submit_times = {
+        s["userId"]: {
+            "newest": s.get("submitted_at", ""),
+            "all": [a.get("submitted_at", "") for a in s.get("attempts", [])],
+        }
+        for s in students
+    }
+
+    records = load_reviewed(scores)
+    rows = compute_decay(records, submit_times, due_dt, buckets)
+
+    # Annotate scores.xlsx in place. decay_factor drives final_score downstream;
+    # reviewer_override_score is left untouched (it stays a pure human field).
+    # Decay notes are stripped then re-appended so re-runs stay idempotent.
+    import openpyxl
+    wb = openpyxl.load_workbook(scores)
+    ws = wb.active
+    idx = {c.value: i for i, c in enumerate(ws[1])}
+    from copy import copy as _copy
+    for name in ("submitted_at", "hours_late", "decay_factor", "decay_reason"):
+        if name not in idx:
+            c = ws.cell(row=1, column=ws.max_column + 1, value=name)
+            c.font = _copy(ws.cell(1, 1).font)
+            idx[name] = c.column - 1
+    by_sid = {d.student_id: d for d in rows}
+    for r in range(2, ws.max_row + 1):
+        sid = str(ws.cell(r, idx["student_id"] + 1).value or "")
+        d = by_sid.get(sid)
+        if d is None:
+            continue
+        notes = str(ws.cell(r, idx["reviewer_notes"] + 1).value or "")
+        notes = "\n".join(
+            l for l in notes.splitlines() if not l.startswith("迟交扣分：")
+        ).strip()
+        if d.factor < 1.0:
+            note = f"迟交扣分：{d.raw_score:g}×{d.factor:g}={d.final_score:g}（{d.reason}）"
+            notes = f"{notes}\n{note}".strip() if notes else note
+        ws.cell(r, idx["reviewer_notes"] + 1, notes)
+        for name, val in (("submitted_at", d.submitted_at),
+                          ("hours_late", round(d.hours_late, 1)),
+                          ("decay_factor", d.factor),
+                          ("decay_reason", d.reason)):
+            ws.cell(r, idx[name] + 1, val)
+
+    wb.save(scores)
+
+    late = [d for d in rows if d.factor < 1.0]
+    rejected = [d for d in late if d.factor == 0]
+    table = Table(title=f"Late submissions ({len(late)} of {len(rows)})", show_lines=True)
+    for col_name in ("ID", "Name", "Submitted", "Hours late", "Factor", "Raw", "Final"):
+        table.add_column(col_name)
+    for d in late:
+        style = "red" if d.factor == 0 else "yellow"
+        table.add_row(d.student_id, d.student_name, d.submitted_at,
+                      f"{d.hours_late:.1f}", f"{d.factor:g}",
+                      f"{d.raw_score:g}", f"[{style}]{d.final_score:g}[/]")
+    console.print(table)
+    if rejected:
+        console.print(f"[red]{len(rejected)} student(s) submitted >72h late — rule says not accepted (factor 0).[/red]")
+    console.print(f"[green]Updated {scores}[/green] — verify the list above, then submit with:")
+    console.print(f"  uv run python main.py submit --scores {scores} --dry-run")
+
+    if json_output:
+        typer.echo(json.dumps(
+            {"scores": str(scores), "due": due_dt.strftime("%Y-%m-%d %H:%M:%S"),
+             "late": [d.__dict__ for d in late]},
+            ensure_ascii=False, indent=2, default=str,
+        ))
+
+
+def _save_submissions(submissions: list, save_dir: Path, assignment_title: str) -> dict[str, list[Path]]:
+    """Save each student's files to save_dir/assignment_title/ for human review.
+
+    Saves every attachment plus a `_text.txt` for the text answer (if any).
+    Returns a map of student_id -> saved file paths (used by CLI grader engines).
+    """
     import re
+    import shutil
+
+    # ORFS/EDA binary artifacts are ungradeable and can crash a reader tool —
+    # keep them on disk for humans but out of the grader's file list.
+    _JUNK_EXT = {".odb", ".spef", ".sdf", ".lib", ".lef", ".def", ".db",
+                 ".bin", ".a", ".o", ".so", ".v", ".sv", ".cdl", ".gds"}
+    _MAX_LISTED_SIZE = 50 * 1024 * 1024
+
+    def _gradeable(p: Path) -> bool:
+        if is_archive(p.name) or p.suffix.lower() in _JUNK_EXT:
+            return False
+        try:
+            return p.stat().st_size <= _MAX_LISTED_SIZE
+        except OSError:
+            return False
+
+    from crawler.extract import (
+        _unique, dir_files, extract_archive, extract_docx_media, is_archive,
+        render_pdf_pages, text_sidecar,
+    )
     safe_title = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', assignment_title)
     dest = save_dir / safe_title
     dest.mkdir(parents=True, exist_ok=True)
+    files_map: dict[str, list[Path]] = {}
     for sub in submissions:
+        # Per-student layout:
+        #   <sid>_<name>/originals/  — the raw uploads, original filenames
+        #   <sid>_<name>/grading/    — everything the grader sees: extracted
+        #                            archive trees, non-archive copies,
+        #                            .txt sidecars, rendered PDF pages,
+        #                            embedded docx media, text answers
+        safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', sub.student_name)
+        sdir = dest / f"{sub.student_id}_{safe_name}"
+        # Remove stale artifacts from previous runs, including the old flat
+        # layout (<sid>_<name>.zip / _files/ / .pdf_pages/) at top level.
+        for p in dest.iterdir():
+            if p.name.startswith(f"{sub.student_id}_"):
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+        originals = sdir / "originals"
+        grading = sdir / "grading"
+        originals.mkdir(parents=True)
+        grading.mkdir()
+
         for att in sub.attachments:
-            ext = Path(att.filename).suffix or ""
-            # Filename: studentId_studentName.ext  (e.g. 2300012345_张三.pdf)
-            safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', sub.student_name)
-            filename = f"{sub.student_id}_{safe_name}{ext}"
-            (dest / filename).write_bytes(att.data)
+            orig = _unique(originals / Path(att.filename).name)
+            orig.write_bytes(att.data)
+            if is_archive(att.filename):
+                extract_archive(orig, grading)
+            else:
+                shutil.copy2(orig, grading / orig.name)
+
+        # .pdf/.docx get a .txt sidecar plus rendered/embedded images so the
+        # grader can read the text AND visually verify figures/screenshots.
+        for p in list(dir_files(grading)):
+            text_sidecar(p)
+            render_pdf_pages(p)
+            extract_docx_media(p)
+        if sub.text_content.strip():
+            (grading / f"{sub.student_id}_{safe_name}_text.txt").write_text(
+                sub.text_content, encoding="utf-8")
+        files_map[sub.student_id] = [p for p in dir_files(grading) if _gradeable(p)]
+    return files_map
 
 
 if __name__ == "__main__":

@@ -24,11 +24,13 @@ the authoritative guide for any grading, review, or submission task.
 | Command | Purpose |
 |---|---|
 | `assignments` | List assignments and their `gradeBookPK` (`--column`) values |
+| `engines` | List scoring engines and which agentic CLIs are installed |
 | `grade` | Crawl submissions, score with the LLM API, export `scores.xlsx` |
 | `review` | Interactive TUI for reviewing students one by one |
 | `status` | Summarise progress; `--json` for machine-readable output |
 | `show` | Full detail for one student; `--json` for machine-readable output |
 | `approve` | Record a human review decision without the TUI |
+| `decay` | Apply the late-submission rule (`.ddl_rule`), annotating scores.xlsx in place |
 | `submit` | Post approved grades; always preview with `--dry-run` first |
 
 ## Development

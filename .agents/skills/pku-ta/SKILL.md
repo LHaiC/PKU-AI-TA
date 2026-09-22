@@ -13,9 +13,11 @@ Use the `ta` CLI in this repository to grade submissions from PKU's teaching
 platform (course.pku.edu.cn, Blackboard), show the results to the user, record
 their review decisions, and hand off the final submission step.
 
-Grading itself always runs through the configured LLM API (OpenRouter or any
-OpenAI-compatible endpoint). Your job is to drive the pipeline, explain the
-results, and keep the human in control.
+Grading runs through the configured scoring engine: either an OpenAI-compatible
+LLM API (`--engine api`, the default; needs `OPENAI_API_KEY`) or an agentic CLI
+(`--engine devin|claude|codex|opencode|cmdc`, which reads the saved submission files
+itself — no API key needed; `ta engines` lists which CLIs are installed). Your job is to drive the pipeline, explain the results, and
+keep the human in control.
 
 ## Hard rules
 
@@ -39,8 +41,24 @@ Before grading, confirm:
 - `uv run python main.py --help` works (install with `uv sync --extra dev`).
 - `.env` exists (copy from `.env.example`) with `OPENAI_API_KEY`, `PKU_USERNAME`,
   `PKU_PASSWORD`, and ideally `COURSE_ID`.
-- `rubric.md` exists. If it does not, help the user write one; ask for the
-  problem list and point values instead of inventing criteria.
+- An assignment workdir exists outside the repo (e.g. `../Lab1/`) containing
+  `rubric.md`. If it does not, help the user write one; ask for the problem
+  list and point values instead of inventing criteria.
+
+### Working-directory convention
+
+Everything for one assignment lives beside its `scores.xlsx`:
+
+```
+<workdir>/scores.xlsx   meta.json   rubric.md   prompt_zh.md?   .ddl_rule?
+                        submissions/<assignment>/<sid>_<name>/{originals,grading}
+```
+
+`--scores`/`--out` selects the workdir; `submissions/`, `rubric.md`,
+`prompt_zh.md`, `.ddl_rule`, and `meta.json` (course_id/column/title/due)
+all resolve inside it. `grade` writes `meta.json` (including the deadline
+crawled from the gradebook); `decay` and `submit` read it back, so
+`--course`/`--column`/`--due` are only needed for `grade` or as overrides.
 
 ## Workflow
 
@@ -57,7 +75,7 @@ This prints a table of assignment titles and `gradeBookPK` values. Use the
 ### 1. Grade
 
 ```bash
-uv run python main.py grade --course _98024_1 --column 423829 --rubric rubric.md --out scores.xlsx
+uv run python main.py grade --course _98024_1 --column 423829 --out ../Lab1/scores.xlsx
 ```
 
 Useful flags:
@@ -68,6 +86,7 @@ Useful flags:
 | `--resume` | Continue an interrupted run |
 | `--regrade-unapproved` | Keep approved students, regrade the rest |
 | `--prompt prompts/system_zh.md` | Use the Chinese grading prompt |
+| `--engine devin` | Grade via an agentic CLI (`devin`/`claude`/`codex`/`opencode`/`cmdc`) instead of the LLM API — needs `--save-dir` (submission files on disk); `ta engines` lists installed CLIs; `TA_CLI_MODEL`/`TA_CLI_EFFORT` tune it |
 | `--verbose` | Show each result as it is scored |
 
 Grading is long-running and writes a checkpoint to the output spreadsheet after
@@ -105,15 +124,30 @@ uv run python main.py approve --student 2300012345 --scores scores.xlsx --revoke
 - Non-perfect scores require `--notes` unless `--force` is given. Do not use
   `--force` unless the user explicitly asks for it.
 - `--score` is an override and only works with a single student.
-- `--auto-perfect` approves only 100/100 records that are not flagged for
-  review.
+- `--auto-perfect` approves only 100/100 records with no flags or uncertain
+  parts — batch-approve clean perfect scores with it, then run the TUI's
+  `--needs-review` queue for everything else (it lists flagged, uncertain,
+  and all non-perfect rows).
 
-### 4. Hand off the submission
+### 4. Late-submission decay (if the assignment has a deadline rule)
+
+```bash
+uv run python main.py decay --scores ../Lab1/scores.xlsx
+```
+
+Reads `.ddl_rule` (copy `.ddl_rule.example` — `上限小时 系数` per line,
+e.g. `24  0.8`), fetches submission timestamps and the deadline (meta.json →
+gradebook REST), and annotates scores.xlsx in place with `decay_factor` etc.
+`final_score = (override or LLM score) × decay_factor`. Late students are
+listed for verification; re-running is idempotent. Skip this step entirely
+when the course has no late rule.
+
+### 5. Hand off the submission
 
 Preview (safe, posts nothing):
 
 ```bash
-uv run python main.py submit --course _98024_1 --column 423829 --scores scores.xlsx --dry-run
+uv run python main.py submit --scores ../Lab1/scores.xlsx --dry-run
 ```
 
 Then show the user the same command **without** `--dry-run` and let them run

@@ -5,14 +5,14 @@ reasoning, and lets you approve, override, or edit scores without touching
 Excel.
 
 ```bash
-# Only students flagged for review (low confidence or uncertain parts)
+# Flagged, uncertain, or non-perfect students — the normal queue
 uv run python main.py review --needs-review
 
 # Everyone, including already-approved students
 uv run python main.py review --all
 
-# Auto-approve perfect scores, then review the rest
-uv run python main.py review --auto-approve --needs-review
+# Batch-approve clean perfect scores first (no TUI), then review the rest
+uv run python main.py approve --auto-perfect --scores scores.xlsx
 
 # Try it with sample data — no login, no API key, nothing is submitted
 uv run python main.py review --demo
@@ -35,7 +35,10 @@ uv run python main.py review --demo
 | `q` / `quit` | Quit (asks to save if anything changed) | — |
 
 Approving a non-perfect score requires reviewer notes, matching the
-`ta approve` command-line behavior.
+`ta approve` command-line behavior. The student panel's title tracks both
+progress counters — queue position and total approvals (`Student 3/31 ·
+approved 26/57`) — and the queue is ordered by student ID so it lines up with
+the `submissions/<id>_<name>/` directories.
 
 ## Layout notes
 

@@ -49,6 +49,12 @@ uv run python main.py grade --course _98024_1 --column 423829 --rubric rubric.md
 # Chinese grading prompt
 uv run python main.py grade --course _98024_1 --column 423829 --rubric rubric.md \
   --prompt prompts/system_zh.md
+
+# Grade with an agentic CLI instead of the HTTP API (devin/claude/codex/opencode/cmdc).
+# Submission files must be saved to disk — the CLI agent reads them itself.
+# `ta engines` shows which CLIs are installed on this machine.
+uv run python main.py grade --course _98024_1 --column 423829 --rubric rubric.md \
+  --engine devin --save-dir submissions/
 ```
 
 | Flag | Description |
@@ -63,6 +69,7 @@ uv run python main.py grade --course _98024_1 --column 423829 --rubric rubric.md
 | `--verbose` / `-v` | Print each student's result as it is scored |
 | `--resume` / `-r` | Resume a previously interrupted run |
 | `--regrade-unapproved` | Keep approved students, regrade the rest |
+| `--engine` | Scoring engine: `api` (default), `devin`, `claude`, `codex`, `opencode`, `cmdc`. Env: `TA_CLI_ENGINE`; tune with `TA_CLI_MODEL`/`TA_CLI_EFFORT` |
 
 Progress is checkpointed to the output spreadsheet after every student, so
 `--resume` never re-scores finished submissions. Students already graded on
@@ -91,26 +98,44 @@ uv run python main.py show --student 2300012345 --scores scores.xlsx --json
 uv run python main.py show --student 2300012345 --scores scores.xlsx --submissions submissions/
 ```
 
+## Working-directory convention
+
+Each assignment lives in its own directory beside the repo (e.g. `../Lab0/`).
+Point `--scores` (or `--out` for `grade`) at that directory and everything
+else resolves inside it:
+
+```
+Lab0/
+  scores.xlsx        # single source of truth — grading, review, decay, submit
+  meta.json          # course_id / column / title / due (written by grade & decay)
+  rubric.md          # rubric (grade --rubric default)
+  prompt_zh.md       # grader prompt, picked up automatically if present
+  .ddl_rule          # late-penalty rule (copy the repo's .ddl_rule.example)
+  submissions/       # crawled attachments per student
+```
+
+`--course`/`--column`/`--due` only need to be passed to `grade` (or once, to
+override); `decay` and `submit` read them from `meta.json`.
+
 ## `ta review`
 
 Interactive TUI for reviewing students one by one. See
 [tui.md](tui.md) for key bindings and a preview image.
 
 ```bash
-uv run python main.py review --needs-review
-uv run python main.py review --all
-uv run python main.py review --auto-approve --needs-review
+uv run python main.py review --scores ../Lab0/scores.xlsx --needs-review
+uv run python main.py review --scores ../Lab0/scores.xlsx --all
 uv run python main.py review --demo
 ```
 
 | Flag | Description |
 |---|---|
-| `--scores` | Excel file to review (default: `scores.xlsx`) |
-| `--submissions` | Directory with submission files (default: `submissions/`) |
-| `--rubric` | Rubric file opened with `r` (default: `rubric.md`) |
-| `--needs-review` / `-n` | Only students flagged `needs_review=YES` |
+| `--scores` | Excel file to review; its directory is the workdir (default: `scores.xlsx`) |
+| `--submissions` | Directory with submission files (default: `<scores dir>/submissions`) |
+| `--rubric` | Rubric file opened with `r` (default: `<scores dir>/rubric.md`) |
+| `--needs-review` / `-n` | Only flagged students, or any non-perfect score |
 | `--all` / `-a` | Include already-approved students |
-| `--auto-approve` | Auto-approve 100/100 students not flagged for review |
+| `--below N` | Hard cap: only scores below N percent |
 | `--demo` | Use bundled sample data; no login or API key required |
 
 ## `ta approve`
@@ -146,8 +171,33 @@ uv run python main.py approve --student 2300012345 --scores scores.xlsx --json
 | `--notes` | Reviewer notes to store |
 | `--force` | Allow a non-perfect approval without notes |
 | `--revoke` | Set `approved` back to `NO` |
-| `--auto-perfect` | Approve 100/100 records not flagged for review |
+| `--auto-perfect` | Approve 100/100 records with no flags or uncertain parts |
 | `--json` | Print one JSON document and nothing else |
+
+## `ta decay`
+
+Apply the late-submission penalty rule. Fetches each student's submission
+timestamp from Blackboard, looks up the deadline (meta.json → gradebook REST
+API), and annotates the scores file **in place** with `submitted_at`,
+`hours_late`, `decay_factor`, `decay_reason`. `final_score` becomes
+`(override or LLM score) × decay_factor`, so `submit` reads the same file.
+Re-running is safe: factors are recomputed and the 迟交扣分 note is refreshed,
+not duplicated. Students with factor < 1 are listed for verification.
+
+```bash
+uv run python main.py decay --scores ../Lab0/scores.xlsx
+uv run python main.py decay --scores ../Lab0/scores.xlsx --due "2026-09-18 00:00"
+```
+
+The rule file is `.ddl_rule` — one `<hours late upper bound> <factor>` per
+line (copy `.ddl_rule.example`; it is gitignored like `.env`):
+
+```
+24   0.8    # ≤24h late: ×0.8
+48   0.6
+72   0.4
+# beyond the last bound: 0 (rejected) unless an `inf` row says otherwise
+```
 
 ## `ta submit`
 
@@ -155,18 +205,18 @@ Post approved grades back to course.pku.edu.cn. **Real submission is
 human-only** — always preview with `--dry-run` first.
 
 ```bash
-# Preview (posts nothing)
-uv run python main.py submit --course _98024_1 --column 423829 --scores scores.xlsx --dry-run
+# Preview (posts nothing) — course/column come from meta.json when omitted
+uv run python main.py submit --scores ../Lab0/scores.xlsx --dry-run
 
 # Real submission
-uv run python main.py submit --course _98024_1 --column 423829 --scores scores.xlsx
+uv run python main.py submit --scores ../Lab0/scores.xlsx
 
 # Machine-readable result
-uv run python main.py submit --course _98024_1 --column 423829 --scores scores.xlsx --dry-run --json
+uv run python main.py submit --scores ../Lab0/scores.xlsx --dry-run --json
 ```
 
 Rows without `approved = YES` are never submitted. Reviewer notes are sent
-along as the feedback text.
+along as the feedback text (truncated to 2000 chars by the platform payload).
 
 ## Configuration
 
@@ -174,7 +224,11 @@ Copy `.env.example` to `.env` and fill it in:
 
 | Variable | Description |
 |---|---|
-| `OPENAI_API_KEY` | OpenRouter (or compatible) API key |
+| `TA_CLI_ENGINE` | Scoring engine: `api` (default), `devin`, `claude`, `codex`, `opencode`, `cmdc` (`TA_ENGINE` still accepted) |
+| `TA_CLI_MODEL` | Model passed to the CLI engine (mapped per engine; empty = CLI default; `TA_DEVIN_MODEL` still accepted) |
+| `TA_CLI_EFFORT` | Reasoning effort for the CLI engine, e.g. `low`/`medium`/`high` — claude `--effort`, codex `model_reasoning_effort`, opencode `--variant`, cmdc `--effort` (ignored by devin/api) |
+| `TA_GRADER_CMD` | Custom grader command template with `{prompt_file}`; overrides engine presets |
+| `OPENAI_API_KEY` | OpenRouter (or compatible) API key — required only for `TA_CLI_ENGINE=api` |
 | `OPENAI_BASE_URL` | API endpoint (default: `https://openrouter.ai/api/v1`) |
 | `TA_MODEL` | Model to use, e.g. `qwen/qwen3.5-397b-a17b` |
 | `PKU_USERNAME` | PKU student/staff ID |
