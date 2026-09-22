@@ -9,6 +9,7 @@ class TestGetSession:
         with patch("auth.iaaa.settings") as mock_settings:
             mock_settings.pku_username = ""
             mock_settings.pku_password = ""
+            mock_settings.bb_cookie = ""
             with pytest.raises(RuntimeError, match="PKU_USERNAME"):
                 get_session()
 
@@ -16,6 +17,7 @@ class TestGetSession:
         with patch("auth.iaaa.settings") as mock_settings:
             mock_settings.pku_username = "user"
             mock_settings.pku_password = "pass"
+            mock_settings.bb_cookie = ""
 
             with patch("auth.iaaa.httpx.Client") as MockClient:
                 mock_client = MagicMock()
@@ -54,6 +56,7 @@ class TestGetSession:
         with patch("auth.iaaa.settings") as mock_settings:
             mock_settings.pku_username = "user"
             mock_settings.pku_password = "pass"
+            mock_settings.bb_cookie = ""
 
             with patch("auth.iaaa.httpx.Client") as MockClient:
                 mock_client = MagicMock()
