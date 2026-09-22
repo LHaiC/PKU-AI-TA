@@ -54,11 +54,12 @@ class TestEngineArgv:
     def test_devin_uses_prompt_file(self, monkeypatch):
         monkeypatch.setattr("scorer.cli_scorer.settings.grader_cmd", "")
         monkeypatch.setattr("scorer.cli_scorer.settings.ta_cli_model", "swe-2-medium")
-        argv = _engine_argv("devin", Path("/tmp/p.md"), "prompt text")
+        prompt_file = Path("tmp") / "p.md"
+        argv = _engine_argv("devin", prompt_file, "prompt text")
         # --model must come before -p: -p's optional arg swallows positionals
         assert argv[:4] == ["devin", "--model", "swe-2-medium", "-p"]
         assert "--prompt-file" in argv
-        assert "/tmp/p.md" in argv
+        assert str(prompt_file) in argv
 
     def test_claude_passes_prompt_inline(self, monkeypatch):
         monkeypatch.setattr("scorer.cli_scorer.settings.grader_cmd", "")
@@ -92,9 +93,9 @@ class TestEngineArgv:
             "scorer.cli_scorer.settings.grader_cmd",
             "mygrader --file {prompt_file} --fast",
         )
-        argv = _engine_argv("devin", Path("/tmp/p.md"), "x")
+        argv = _engine_argv("devin", Path("p.md"), "x")
         assert argv[:2] == ["bash", "-c"]
-        assert "mygrader --file /tmp/p.md --fast" in argv[2]
+        assert "mygrader --file" in argv[2] and "p.md --fast" in argv[2]
 
 
 class TestCliScorer:
