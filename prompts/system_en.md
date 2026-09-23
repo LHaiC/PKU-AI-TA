@@ -16,7 +16,7 @@ Return ONLY a JSON object (no markdown fences, no extra text):
       "criterion": "<problem number and name, e.g. 1.2 Selection Sort>",
       "points_awarded": <float>,
       "points_max": <float>,
-      "reasoning": "<describe what is correct; for any deduction write: 'deduct X pts: <specific reason>'. If no deduction, state why full marks are awarded.>"
+      "reasoning": "<deduction lines are sent verbatim to the student as feedback: write one terse teacher-voice sentence naming what's missing and the deduction, e.g. 'deduct 4 pts: no critical-path screenshot'. No process narration ('verified', 'clearly visible'), no filler. Full-mark criteria: one short clause.>"
     }
   ],
   "uncertain_parts": [
