@@ -443,6 +443,7 @@ def submit(
     course: Annotated[str, typer.Option(help="Blackboard course ID")] = "",
     column: Annotated[str, typer.Option(help="Gradebook column (assignment) ID")] = "",
     scores: Annotated[Path, typer.Option(help="Reviewed Excel spreadsheet")] = Path("scores.xlsx"),
+    student: Annotated[str, typer.Option(help="Comma-separated student IDs to submit; empty = all approved")] = "",
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print what would be submitted without posting")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
 ) -> None:
@@ -480,6 +481,13 @@ def submit(
         raise typer.Exit(1)
 
     records = load_reviewed(scores)
+    if student.strip():
+        wanted = {s.strip() for s in student.split(",") if s.strip()}
+        records = [r for r in records if r.result.student_id in wanted]
+        missing = wanted - {r.result.student_id for r in records}
+        if missing and not json_output:
+            console.print(f"[yellow]Warning: not found in {scores.name}: "
+                          f"{', '.join(sorted(missing))}[/yellow]")
     approved_count = sum(1 for r in records if r.approved)
     if not json_output:
         console.print(f"Loaded {len(records)} record(s), {approved_count} approved.")

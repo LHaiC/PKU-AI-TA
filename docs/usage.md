@@ -208,6 +208,9 @@ human-only** — always preview with `--dry-run` first.
 # Preview (posts nothing) — course/column come from meta.json when omitted
 uv run python main.py submit --scores ../Lab0/scores.xlsx --dry-run
 
+# Re-post corrected feedback for one student only
+uv run python main.py submit --scores ../Lab0/scores.xlsx --student 2300012345
+
 # Real submission
 uv run python main.py submit --scores ../Lab0/scores.xlsx
 
