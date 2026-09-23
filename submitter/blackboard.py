@@ -47,13 +47,16 @@ def _fetch_assignment_title(client: httpx.Client, course_id: str, grade_book_pk:
     return ""
 
 
-def _fetch_student_meta(client: httpx.Client, course_id: str, grade_book_pk: str) -> tuple[dict[str, dict], str]:
+def _fetch_student_meta(client: httpx.Client, course_id: str, grade_book_pk: str,
+                        title_hint: str = "") -> tuple[dict[str, dict], str]:
     """
     Return ({userId: {filePk, attemptPk}}, assignment_title) by parsing getStudentWork.do.
     """
     from crawler.pku_homework import _parse_student_list
 
-    title = _fetch_assignment_title(client, course_id, grade_book_pk)
+    # getStudentWork.do 404s without a title; fall back to meta.json when the
+    # assignment no longer appears in getHomeWorkList.do (e.g. closed/hidden).
+    title = _fetch_assignment_title(client, course_id, grade_book_pk) or title_hint
 
     resp = client.get(
         f"{HW_BASE}/getStudentWork.do",
@@ -111,6 +114,7 @@ def submit_scores(
     *,
     dry_run: bool = False,
     quiet: bool = False,
+    title_hint: str = "",
 ) -> list[dict]:
     """
     Submit approved grades via saveStudentGrade.do.
@@ -160,7 +164,8 @@ def submit_scores(
     # ── Step 1: fetch filePk / attemptPk for all students ────────────────
     log("  Fetching submission metadata…")
     try:
-        student_meta, assignment_title = _fetch_student_meta(client, course_id, grade_book_pk)
+        student_meta, assignment_title = _fetch_student_meta(
+            client, course_id, grade_book_pk, title_hint)
     except httpx.HTTPStatusError as e:
         log(f"[red]Error fetching student list:[/red] {e}")
         return [{

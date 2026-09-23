@@ -507,7 +507,9 @@ def submit(
         console.print("[bold]Authenticating with PKU IAAA…[/bold]")
     client = get_session()
 
-    results = submit_scores(client, course_id, col_id, records, dry_run=dry_run, quiet=json_output)
+    results = submit_scores(client, course_id, col_id, records,
+                            dry_run=dry_run, quiet=json_output,
+                            title_hint=str(meta.get("title") or ""))
 
     if json_output:
         typer.echo(json.dumps(
