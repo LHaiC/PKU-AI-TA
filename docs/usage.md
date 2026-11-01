@@ -159,6 +159,9 @@ uv run python main.py approve --student 2300012345 --scores scores.xlsx --revoke
 # Approve every perfect score that is not flagged for review
 uv run python main.py approve --auto-perfect --scores scores.xlsx
 
+# Skip reviewing perfect scores entirely: approve flagged 100s too
+uv run python main.py approve --auto-perfect --include-flagged --scores scores.xlsx
+
 # Machine-readable result
 uv run python main.py approve --student 2300012345 --scores scores.xlsx --json
 ```
@@ -172,6 +175,7 @@ uv run python main.py approve --student 2300012345 --scores scores.xlsx --json
 | `--force` | Allow a non-perfect approval without notes |
 | `--revoke` | Set `approved` back to `NO` |
 | `--auto-perfect` | Approve 100/100 records with no flags or uncertain parts |
+| `--include-flagged` | With `--auto-perfect`: approve perfect records even if flagged or uncertain |
 | `--json` | Print one JSON document and nothing else |
 
 ## `ta decay`

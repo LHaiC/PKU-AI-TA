@@ -173,3 +173,25 @@ class TestApproveCommand:
         assert records["2023001002"].approved is False
         # Flagged for review: perfect but must not be auto-approved
         assert records["2023001003"].approved is False
+
+    def test_auto_perfect_include_flagged(self, tmp_path):
+        scores = write_scores(tmp_path, [
+            make_result("2023001001", total_score=100.0),
+            make_result("2023001002", total_score=70.0),
+            make_result("2023001003", total_score=100.0, needs_review=True),
+        ])
+        result = runner.invoke(app, [
+            "approve", "--auto-perfect", "--include-flagged", "--scores", str(scores)
+        ])
+        assert result.exit_code == 0
+        records = {r.result.student_id: r for r in load_reviewed(scores)}
+        assert records["2023001001"].approved is True
+        assert records["2023001002"].approved is False
+        assert records["2023001003"].approved is True
+
+    def test_include_flagged_requires_auto_perfect(self, tmp_path):
+        scores = write_scores(tmp_path, [make_result("2023001001", total_score=100.0)])
+        result = runner.invoke(app, [
+            "approve", "--include-flagged", "--scores", str(scores)
+        ])
+        assert result.exit_code == 1

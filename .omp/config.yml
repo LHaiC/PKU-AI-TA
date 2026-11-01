@@ -1,0 +1,16 @@
+# omp project settings — backstop for the human-only submission rule.
+# This is an approval policy, not a sandbox: it governs the bash tool only.
+# Keep allowCompoundCommands off: with it on, omp evaluates deny/prompt rules
+# first and a dry-run inside a `&&` chain would be denied. Here an `allow` rule
+# matches only a simple command, so a chained dry-run is denied too — run it on
+# its own line.
+bash:
+  patterns:
+    - match: "*main.py submit*dry-run*"
+      approval: allow
+    - match: "*uv run ta submit*dry-run*"
+      approval: allow
+    - match: "*main.py submit*"
+      approval: deny
+    - match: "*uv run ta submit*"
+      approval: deny

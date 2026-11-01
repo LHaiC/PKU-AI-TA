@@ -774,6 +774,7 @@ def approve(
     force: Annotated[bool, typer.Option("--force", help="Allow approving a non-perfect score without notes")] = False,
     revoke: Annotated[bool, typer.Option("--revoke", help="Set approved back to NO instead of YES")] = False,
     auto_perfect: Annotated[bool, typer.Option("--auto-perfect", help="Approve every perfect score that is not flagged for review")] = False,
+    include_flagged: Annotated[bool, typer.Option("--include-flagged", help="With --auto-perfect: also approve perfect scores flagged for review")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
 ) -> None:
     """Record a human review decision in the spreadsheet without using the TUI.
@@ -792,6 +793,9 @@ def approve(
     if not wanted and not auto_perfect:
         console.print("[red]Error:[/red] --student is required (or use --auto-perfect).")
         raise typer.Exit(1)
+    if include_flagged and not auto_perfect:
+        console.print("[red]Error:[/red] --include-flagged requires --auto-perfect.")
+        raise typer.Exit(1)
     if score is not None and len(wanted) != 1:
         console.print("[red]Error:[/red] --score can only be used with exactly one --student.")
         raise typer.Exit(1)
@@ -806,11 +810,16 @@ def approve(
         for _row_idx, row_data in rows:
             total_score = float(row_data.get("total_score") or 0)
             total_max = float(row_data.get("total_max") or 100)
+            flagged = (row_data.get("needs_review") == "YES"
+                       or str(row_data.get("uncertain_parts_json") or "").strip()
+                       not in ("", "[]", "null"))
             if (total_score >= total_max
-                    and row_data.get("needs_review") != "YES"
+                    and (include_flagged or not flagged)
                     and str(row_data.get("approved", "")).upper() != "YES"):
                 auto_ids.append(str(row_data.get("student_id")))
-        modified = auto_approve_students(ws, idx, quiet_console) or modified
+        modified = auto_approve_students(
+            ws, idx, quiet_console, include_flagged=include_flagged
+        ) or modified
 
     by_id: dict[str, tuple[int, dict]] = {}
     for row_idx, row_data in rows:

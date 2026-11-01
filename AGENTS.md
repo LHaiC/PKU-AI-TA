@@ -19,6 +19,18 @@ the authoritative guide for any grading, review, or submission task.
 5. Run commands from the repository root with `uv run`, e.g.
    `uv run python main.py status --scores scores.xlsx`.
 
+## Subagents
+
+A subagent inherits this repo's skills but **not** this file. Paste the hard
+rules into its task context and tell it to read `skill://pku-ta` first.
+
+- Fan out by workdir (`scores.xlsx`), never by student: `grade` already scores
+  in parallel and rewrites the checkpoint after every student, so two
+  processes on one spreadsheet lose approvals.
+- Subagents may crawl, grade, and inspect; they must never run `approve` or
+  `submit`, including `--auto-perfect`.
+- Approval is a human decision recorded by the parent session only.
+
 ## Command overview
 
 | Command | Purpose |

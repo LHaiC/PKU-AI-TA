@@ -5,16 +5,18 @@ change and no model behavior changes. What changes is who operates the
 commands: an agent CLI (opencode, Codex, commandcode, …) reads the skill,
 runs the pipeline, and reports back, while the human only makes decisions.
 
-## How each CLI finds the workflow
+## How the CLI finds the workflow
 
-| CLI | Discovery |
-|---|---|
-| opencode | Reads `AGENTS.md` and repo skills at `.agents/skills/<name>/SKILL.md` |
-| Codex | Reads `AGENTS.md`; it can open `.agents/skills/pku-ta/SKILL.md` directly |
-| commandcode | Reads `AGENTS.md`; it can open the skill file directly |
+There is nothing CLI-specific to configure. Open the repository and tell the
+agent to read `AGENTS.md` (hard rules plus a pointer) or
+`.agents/skills/pku-ta/SKILL.md` (the authoritative workflow), then follow it.
 
-`AGENTS.md` contains the hard rules and a pointer to the skill. The skill
-itself (`.agents/skills/pku-ta/SKILL.md`) is the authoritative workflow.
+```text
+Read .agents/skills/pku-ta/SKILL.md and follow it. Grade Lab 1 and tell me
+what needs my attention.
+```
+
+`AGENTS.md` is the short version: hard rules plus a pointer to the skill.
 
 ## What agents may and may not do
 
@@ -24,9 +26,28 @@ itself (`.agents/skills/pku-ta/SKILL.md`) is the authoritative workflow.
 | Grade with the API | ✅ `ta grade` | |
 | Inspect results | ✅ `ta status --json`, `ta show --json` | |
 | Explain deductions and flags | ✅ | |
-| Approve / override / revoke | ✅ only after explicit confirmation | confirms |
+| Approve / override / revoke | ✅ only after explicit confirmation, from the parent session | confirms |
+| Approve from a subagent | ❌ never, including `--auto-perfect` | |
 | Preview submission | ✅ `ta submit --dry-run` | |
 | Real submission | ❌ never | ✅ runs `ta submit` |
+
+## Subagents
+
+Fan out by workdir (`scores.xlsx`), never by student: `grade` already scores
+with `TA_THREADS` and rewrites the checkpoint after every student, so two
+processes on one spreadsheet silently lose approvals.
+
+- Subagents may crawl, grade, and inspect (`status --json`, `show --json`).
+- Subagents must never run `approve` or `submit`, including `--auto-perfect`.
+  Approval is recorded by the parent session after the human confirms; the
+  batch policy "approve every perfect score" is one such confirmation.
+- A child session inherits repo skills but not `AGENTS.md`: put the hard rules
+  in its task context and tell it to read `skill://pku-ta` first.
+- Read-only scout agents have no shell; use a full-tool agent for anything that
+  runs `ta`.
+- In omp, `.omp/config.yml` denies a bare `submit` command as a backstop. It is
+  an approval policy, not a sandbox: a shell started through another process
+  can still reach the binary.
 
 ## Example session — opencode
 

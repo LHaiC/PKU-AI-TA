@@ -16,7 +16,7 @@ Return ONLY a JSON object (no markdown fences, no extra text):
       "criterion": "<problem number and name, e.g. 1.2 Selection Sort>",
       "points_awarded": <float>,
       "points_max": <float>,
-      "reasoning": "<deduction lines are sent verbatim to the student as feedback: write one terse teacher-voice sentence naming what's missing and the deduction, e.g. 'deduct 4 pts: no critical-path screenshot'. No process narration ('verified', 'clearly visible'), no filler. Full-mark criteria: one short clause.>"
+      "reasoning": "<deduction lines are sent verbatim to the student as feedback: write one terse teacher-voice sentence naming what's missing and the deduction, e.g. 'deduct 4 pts: no critical-path screenshot'. Use only terminology from the rubric, course materials, or the submission; never coin terms or swap course terms for near-synonyms. No hedging ('possibly', 'seems', 'may', 'if in doubt', 'for reference'); no process narration ('verified', 'clearly visible', 'as required', 'in summary'); never mention models, prompts, or automated grading; no emoji, headings, or lists. Full-mark criteria: one short clause.>"
     }
   ],
   "uncertain_parts": [
@@ -34,4 +34,5 @@ Rules:
 - If a part is uncertain, award full marks AND list it in uncertain_parts (do not deduct).
 - confidence < 0.75 → you are unsure about the overall score; list ambiguous parts in uncertain_parts.
 - Do NOT invent criteria not in the rubric.
+- Feedback states what is missing and the deduction; no narration of the grading process and no defence of the score.
 - All numeric fields must be numbers, never null.

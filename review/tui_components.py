@@ -200,8 +200,13 @@ def load_review_data(
 
     return wb, idx, rows
 
-def auto_approve_students(ws: Any, idx: dict, console: Console) -> bool:
-    """Auto-approve students with perfect scores who don't need review."""
+def auto_approve_students(ws: Any, idx: dict, console: Console,
+                          include_flagged: bool = False) -> bool:
+    """Auto-approve students with perfect scores who don't need review.
+
+    include_flagged also approves perfect scores carrying a review flag or
+    uncertain parts, so the review queue is left with non-perfect rows only.
+    """
     auto_approved = 0
     modified = False
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -215,7 +220,7 @@ def auto_approve_students(ws: Any, idx: dict, console: Console) -> bool:
                    or str(row_data.get("uncertain_parts_json") or "").strip() not in ("", "[]", "null"))
         already_approved = str(row_data.get("approved", "")).upper() == "YES"
 
-        if total_score >= total_max and not flagged and not already_approved:
+        if total_score >= total_max and not already_approved and (include_flagged or not flagged):
             student_name = row_data.get("student_name", "")
             student_id = row_data.get("student_id", "")
             console.print(f"  [dim]Auto-approving:[/dim] {student_name} ({student_id}) — {total_score}/{total_max}")

@@ -25,8 +25,9 @@ keep the human in control.
    previewing; `ta submit` without `--dry-run` is human-only. Give the user the
    exact command to run instead.
 2. **Never approve without explicit confirmation.** Only call `ta approve`
-   after the user has clearly confirmed that specific student's score in the
-   conversation.
+   after the user has clearly confirmed that specific student's score — or the
+   batch policy, e.g. "approve every perfect score" — in the conversation.
+   Subagents never approve at all, not even `--auto-perfect`.
 3. **Never read, print, or commit `.env`.** If credentials are missing, tell
    the user which keys to fill in; do not ask them to paste secrets into chat.
 4. **Never change a score silently.** Every override must come from the user,
@@ -124,10 +125,14 @@ uv run python main.py approve --student 2300012345 --scores scores.xlsx --revoke
 - Non-perfect scores require `--notes` unless `--force` is given. Do not use
   `--force` unless the user explicitly asks for it.
 - `--score` is an override and only works with a single student.
-- `--auto-perfect` approves only 100/100 records with no flags or uncertain
-  parts — batch-approve clean perfect scores with it, then run the TUI's
-  `--needs-review` queue for everything else (it lists flagged, uncertain,
-  and all non-perfect rows).
+- Default review policy: skip every 100/100. After the user confirms the batch
+  policy, run
+  `uv run python main.py approve --auto-perfect --include-flagged --scores scores.xlsx`.
+  `--include-flagged` also approves perfect scores carrying a review flag, so
+  `review --needs-review` is left with non-perfect rows only.
+- Without `--include-flagged`, `--auto-perfect` approves only 100/100 records
+  with no flags or uncertain parts; flagged 100s stay in the queue.
+- Never run either form from a subagent.
 
 ### 4. Late-submission decay (if the assignment has a deadline rule)
 
@@ -154,6 +159,19 @@ Then show the user the same command **without** `--dry-run` and let them run
 it. Do not run it yourself, even if asked in a later turn — real submissions
 are always human-only.
 
+## Subagents
+
+Fan out by workdir (`scores.xlsx`), never by student: `grade` already scores in
+parallel and rewrites the checkpoint after every student, so two processes on
+one spreadsheet lose approvals.
+
+- Subagents may crawl, grade, and inspect (`status --json`, `show --json`).
+- Subagents must never run `approve` or `submit`, including `--auto-perfect`.
+  Approval is a human decision recorded by the parent session.
+- A child session inherits this skill but not `AGENTS.md`: put the hard rules
+  in its task context and tell it to read `skill://pku-ta` first.
+- In omp, `.omp/config.yml` denies a bare `submit` command as a backstop.
+
 ## Output formats
 
 `status --json`, `show --json`, `approve --json`, and `submit --json` print a
@@ -161,6 +179,22 @@ single JSON document on stdout and nothing else, so they are safe to parse.
 `show --json` records use the `ScoringResult` schema from `models.py` plus
 `approved`, `reviewer_override_score`, `final_score`, `reviewer_notes`, and
 `submission_file`.
+
+## Student-facing text
+
+Deduction lines are pasted verbatim into student feedback. Write them the way
+the course TA writes on paper:
+
+- Use only terms from `rubric.md`, the course materials, or the submission;
+  never coin a term or swap a course term for a near-synonym.
+- Name the missing item and the deduction. No hedging (`可能`, `似乎`, `大概`,
+  `如有疑问`, `仅供参考`), no process narration (`经核实`, `清晰可见`,
+  `已按要求`, `综上所述`), no defence of the score.
+- One sentence per criterion. No headings, bullets, emoji, or markdown.
+- Never mention models, prompts, automation, or that a score came from a tool.
+
+`prompts/system_zh.md` carries the same rules for the grader; apply them to
+anything else you write for students or parents.
 
 ## Troubleshooting
 
