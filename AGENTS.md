@@ -36,6 +36,8 @@ rules into its task context and tell it to read `skill://pku-ta` first.
 | Command | Purpose |
 |---|---|
 | `assignments` | List assignments and their `gradeBookPK` (`--column`) values |
+| `crawl` | Fetch and save submissions for review without scoring |
+| `import-grades` | Import per-student grading JSON into `scores.xlsx` |
 | `engines` | List scoring engines and which agentic CLIs are installed |
 | `grade` | Crawl submissions, score with the LLM API, export `scores.xlsx` |
 | `review` | Interactive TUI for reviewing students one by one |

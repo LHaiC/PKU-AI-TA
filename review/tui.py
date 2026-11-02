@@ -241,7 +241,11 @@ def run_review_tui(
 
     if session.modified:
         console.print()
-        if Confirm.ask("[bold cyan]Save changes to spreadsheet?[/bold cyan]", default=True):
+        try:
+            save = Confirm.ask("[bold cyan]Save changes to spreadsheet?[/bold cyan]", default=True)
+        except KeyboardInterrupt:
+            save = True
+        if save:
             session.save_changes()
             console.print(f"[green]Saved to {scores}[/green]")
         else:

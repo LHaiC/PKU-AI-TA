@@ -46,16 +46,23 @@ class ScoringResult(BaseModel):
     def pct(self) -> float:
         return round(self.total_score / self.total_max * 100, 1) if self.total_max else 0.0
 
-    def deduction_summary(self, max_chars: int = 1800) -> str:
+    def deduction_summary(self, max_chars: int = 1800, decay_factor: float = 1.0) -> str:
         """Student-facing feedback generated from the breakdown: total plus one
         line per deducted criterion. Used to auto-fill reviewer notes, which are
-        posted to the platform as richContent (visible to the student)."""
+        posted to the platform as richContent (visible to the student).
+
+        With a late-submission factor the header reports the final score and
+        shows the raw score and factor it came from."""
         lines = []
         for b in self.breakdown:
             lost = b.points_max - b.points_awarded
             if lost > 0:
                 lines.append(f"- {b.criterion}（{b.points_awarded:g}/{b.points_max:g}）：{b.reasoning}")
-        head = f"得分 {self.total_score:g}/{self.total_max:g}。"
+        if decay_factor != 1.0:
+            head = (f"得分 {self.total_score * decay_factor:g}/{self.total_max:g}"
+                    f"（原始分 {self.total_score:g} × 迟交系数 {decay_factor:g}）。")
+        else:
+            head = f"得分 {self.total_score:g}/{self.total_max:g}。"
         text = head + ("\n扣分项：\n" + "\n".join(lines) if lines else "")
         return text[:max_chars]
 

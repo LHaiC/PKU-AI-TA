@@ -155,3 +155,29 @@ class TestSpreadsheetRoundtrip:
             rec = load_reviewed(path)[0]
             assert rec.reviewer_notes == "manual note"
             assert rec.approved is False
+
+
+class TestDecayPreservation:
+    def test_export_keeps_decay_columns(self):
+        import openpyxl
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            result = make_result("2100012345")
+            export([result], path)
+
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            start = ws.max_column + 1
+            for i, (name, value) in enumerate(
+                [("submitted_at", "2026-10-28 10:00:00"), ("hours_late", 10.0),
+                 ("decay_factor", 0.8), ("decay_reason", "迟交 10.0 小时")], start=start
+            ):
+                ws.cell(row=1, column=i, value=name)
+                ws.cell(row=2, column=i, value=value)
+            wb.save(path)
+
+            export([result], path)
+            record = load_reviewed(path)[0]
+            assert record.decay_factor == 0.8
+            assert record.final_score == 68.0

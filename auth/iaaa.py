@@ -87,17 +87,33 @@ def _session_from_cookie() -> "httpx.Client | None":
             ),
         },
     )
-    # Sanity check: an invalid/expired cookie gets bounced to the IAAA login
-    # page; a valid one returns the homework list HTML.
-    from crawler.pku_homework import HW_BASE
-    resp = client.get(f"{HW_BASE}/getHomeWorkList.do",
-                      params={"course_id": settings.course_id or "_0_1"})
-    if resp.status_code != 200 or "iaaa" in str(resp.url.host):
-        raise RuntimeError(
-            "BB_COOKIE session is invalid or expired — copy a fresh Cookie "
-            "header from a browser logged into course.pku.edu.cn."
-        )
+    # A stale cookie is served a login page with status 200, so check the REST
+    # identity endpoint instead. Invalid cookies fall through to IAAA login.
+    if not _cookie_is_valid(client):
+        client.close()
+        return None
     return client
+
+
+def _cookie_is_valid(client: httpx.Client) -> bool:
+    """True when the cookie still maps to a logged-in Blackboard user."""
+    try:
+        resp = client.get("/learn/api/public/v1/users/me")
+        if resp.status_code == 200:
+            return True
+        if resp.status_code in (401, 403):
+            return False
+    except httpx.HTTPError:
+        return False
+    # API disabled or gated: fall back to the homework page's login markers.
+    from crawler.pku_homework import HW_BASE
+    try:
+        page = client.get(f"{HW_BASE}/getHomeWorkList.do",
+                          params={"course_id": settings.course_id or "_0_1"})
+    except httpx.HTTPError:
+        return False
+    text = page.text
+    return page.status_code == 200 and "用户名" not in text and "oauthlogin" not in text
 
 
 def _env_otp() -> str:
@@ -126,7 +142,8 @@ def get_session() -> httpx.Client:
 
     if not settings.pku_username or not settings.pku_password:
         raise RuntimeError(
-            "PKU_USERNAME and PKU_PASSWORD must be set in .env to authenticate."
+            "BB_COOKIE is missing or expired and PKU_USERNAME/PKU_PASSWORD are "
+            "not set. Refresh .bb_cookie or fill in the credentials in .env."
         )
 
     client = httpx.Client(base_url=BB_BASE, follow_redirects=True, timeout=30, verify=False)

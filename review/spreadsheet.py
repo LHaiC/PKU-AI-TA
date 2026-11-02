@@ -21,6 +21,8 @@ from models import ReviewRecord, ScoringResult
 _REVIEW_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
 _HEADER_FONT = Font(bold=True)
 
+DECAY_COLUMNS = ["submitted_at", "hours_late", "decay_factor", "decay_reason"]
+
 COLUMNS = [
     "student_id",
     "student_name",
@@ -84,8 +86,11 @@ def export(results: list[ScoringResult], path: Path) -> None:
     ws = wb.active
     ws.title = "Scores"
 
+    # Decay annotations are produced by `ta decay`; keep them across exports.
+    extra = [n for n in DECAY_COLUMNS if any(n in p for p in prior.values())]
+
     # Header row
-    for col, name in enumerate(COLUMNS, start=1):
+    for col, name in enumerate(COLUMNS + extra, start=1):
         cell = ws.cell(row=1, column=col, value=name)
         cell.font = _HEADER_FONT
 
@@ -121,12 +126,13 @@ def export(results: list[ScoringResult], path: Path) -> None:
             notes_v,      # reviewer_notes
             approved_v,   # approved — preserved only if the result is unchanged
         ]
+        row_data += [(old or {}).get(n) for n in extra]
         for col, value in enumerate(row_data, start=1):
             ws.cell(row=row_idx, column=col, value=value)
 
         # Highlight rows that need review
         if r.needs_review:
-            for col in range(1, len(COLUMNS) + 1):
+            for col in range(1, len(COLUMNS) + len(extra) + 1):
                 ws.cell(row=row_idx, column=col).fill = _REVIEW_FILL
 
     # Auto-width for readability

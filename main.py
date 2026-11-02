@@ -3,7 +3,9 @@ PKU AI Teaching Assistant CLI
 
 Commands:
   ta assignments --course <id>                  List assignments and gradeBookPK IDs
+  ta crawl       --course <id> --column <id>    Fetch submissions for review (no scoring)
   ta grade       --course <id> --column <id>    Crawl submissions and score with the LLM
+  ta import-grades <dir> --scores <file>        Import grading JSON into scores.xlsx
   ta review      [--scores scores.xlsx]         Interactive TUI review (--demo included)
   ta status      [--scores scores.xlsx]         Summarise progress (--json)
   ta show        --student <id>                 Full detail for one student (--json)
@@ -65,6 +67,7 @@ def assignments(
 
     from auth.iaaa import get_session
     from crawler.pku_homework import PKUHomeworkCrawler
+    from crawler.save import save_submissions
 
     if not json_output:
         console.print("[bold]Authenticating with PKU IAAA…[/bold]")
@@ -110,6 +113,138 @@ def assignments(
     console.print(table)
     console.print("\nPass the gradeBookPK value to [bold]--column[/bold], e.g. "
                   f"[dim]--column {columns[0].get('gradeBookPK', '')}[/dim]")
+
+
+@app.command()
+def crawl(
+    course: Annotated[str, typer.Option(help="Blackboard course ID, e.g. _12345_1")] = "",
+    column: Annotated[str, typer.Option(help="gradeBookPK to fetch; empty = every assignment")] = "",
+    whitelist: Annotated[str, typer.Option(help="Comma-separated student IDs to include")] = "",
+    out: Annotated[Path, typer.Option(help="Scores path; its directory is the workdir")] = Path("scores.xlsx"),
+    save_dir: Annotated[Optional[Path], typer.Option(help="Default: <out dir>/submissions/")] = None,
+) -> None:
+    """Fetch submissions and save them for review, without grading.
+
+    Writes the same <workdir>/submissions/<assignment>/<sid>_<name>/ layout that
+    `grade` produces, plus meta.json, so files can be reviewed (or graded by an
+    external agent) before any scoring engine runs.
+    """
+    from auth.iaaa import get_session
+    from crawler.pku_homework import PKUHomeworkCrawler
+    from crawler.save import save_submissions
+    from workdir import save_meta
+
+    settings = _load_settings()
+    course_id = course or settings.course_id
+    if not course_id:
+        console.print("[red]Error:[/red] --course is required (or set COURSE_ID in .env)")
+        raise typer.Exit(1)
+
+    client = get_session()
+    crawler = PKUHomeworkCrawler(client, course_id,
+                                 {s.strip() for s in whitelist.split(",") if s.strip()})
+    columns = crawler.fetch_assignments()
+    if not columns:
+        console.print("[red]Error:[/red] no assignments — login may have expired. "
+                      "Refresh .bb_cookie (or PKU credentials) and retry.")
+        raise typer.Exit(1)
+    if column:
+        columns = [c for c in columns if str(c.get("gradeBookPK")) == str(column)]
+        if not columns:
+            console.print(f"[red]Error:[/red] gradeBookPK {column} not found in course {course_id}")
+            raise typer.Exit(1)
+
+    save_dir = save_dir or out.parent / "submissions"
+    for col in columns:
+        pk = col.get("gradeBookPK") or col["id"].strip("_").split("_")[0]
+        title = col.get("name") or col["id"]
+        due = crawler.fetch_due_date(pk)
+        save_meta(out.parent, course_id=course_id, column=pk, title=title,
+                  due=due.strftime("%Y-%m-%d %H:%M:%S") if due else "")
+        submissions = crawler.fetch_submissions(pk, title)
+        if not submissions:
+            console.print(f"[yellow]{title}: no submissions[/yellow]")
+            continue
+        files = save_submissions(submissions, save_dir, title)
+        console.print(f"[cyan]{title}[/cyan]: {len(files)} student(s) → {save_dir / title}")
+    console.print(f"[green]Saved[/green] under {save_dir}")
+
+
+@app.command("import-grades")
+def import_grades(
+    grades: Annotated[Path, typer.Argument(help="Directory of <student_id>.json files")],
+    scores: Annotated[Path, typer.Option(help="Output spreadsheet")] = Path("scores.xlsx"),
+    column: Annotated[str, typer.Option(help="Assignment ID stored on each record")] = "",
+    json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
+) -> None:
+    """Import per-student grading JSON into scores.xlsx.
+
+    Each file follows the ScoringResult schema (student_id, total_score,
+    total_max, breakdown[], uncertain_parts[], confidence, llm_reasoning).
+    Validation is fail-fast: totals must equal the breakdown sum and IDs must be
+    unique, so a broken grader batch never reaches the spreadsheet.
+    """
+    from models import CriterionScore, ScoringResult, UncertainPart
+    from review.spreadsheet import export
+
+    settings = _load_settings()
+    paths = sorted(grades.glob("*.json"))
+    if not paths:
+        console.print(f"[red]Error:[/red] no *.json in {grades}")
+        raise typer.Exit(1)
+
+    results: list[ScoringResult] = []
+    seen: set[str] = set()
+    errors: list[str] = []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            sid = str(data["student_id"])
+            if sid in seen:
+                raise ValueError(f"duplicate student_id {sid}")
+            seen.add(sid)
+            breakdown = [CriterionScore(**b) for b in data.get("breakdown", [])]
+            total = float(data["total_score"])
+            total_max = float(data["total_max"])
+            if total_max <= 0:
+                raise ValueError("total_max must be positive")
+            awarded = sum(b.points_awarded for b in breakdown)
+            if abs(awarded - total) > 0.01:
+                raise ValueError(f"breakdown sums to {awarded:g}, total_score is {total:g}")
+            confidence = min(max(float(data.get("confidence", 0.0)), 0.0), 1.0)
+            pct = total / total_max * 100
+            uncertain = [UncertainPart(**u) for u in data.get("uncertain_parts", [])]
+            results.append(ScoringResult(
+                student_id=sid,
+                student_name=str(data.get("student_name", "")),
+                assignment_id=str(data.get("assignment_id") or column),
+                total_score=total,
+                total_max=total_max,
+                breakdown=breakdown,
+                uncertain_parts=uncertain,
+                confidence=confidence,
+                llm_reasoning=str(data.get("llm_reasoning", "")),
+                needs_review=(confidence < settings.review_threshold
+                              or len(uncertain) > 0
+                              or pct < settings.review_below),
+            ))
+        except Exception as exc:
+            errors.append(f"{path.name}: {exc}")
+
+    if errors:
+        for line in errors:
+            console.print(f"[red]Error:[/red] {line}")
+        console.print(f"[red]Aborted:[/red] {len(errors)} bad file(s); nothing imported.")
+        raise typer.Exit(1)
+
+    export(results, scores)
+    flagged = sum(1 for r in results if r.needs_review)
+    if json_output:
+        typer.echo(json.dumps({"scores": str(scores), "imported": len(results),
+                               "flagged": flagged}, ensure_ascii=False))
+        return
+    console.print(f"Imported [cyan]{len(results)}[/cyan] result(s) → {scores} "
+                  f"({flagged} flagged for review)")
 
 
 @app.command()
@@ -341,7 +476,7 @@ def grade(
 
             files_map: dict[str, list[Path]] = {}
             if save_dir:
-                files_map = _save_submissions(submissions, save_dir, col_title)
+                files_map = save_submissions(submissions, save_dir, col_title)
                 console.print(f"  Saved files → [cyan]{save_dir / col_title}[/cyan]")
 
             if engine_name == "api":
@@ -879,7 +1014,8 @@ def approve(
                     confidence=float(row_data.get("confidence") or 0),
                     breakdown=[CriterionScore(**b) for b in _json.loads(row_data.get("breakdown_json") or "[]")],
                 )
-                auto_notes = res.deduction_summary()
+                auto_notes = res.deduction_summary(
+                    decay_factor=float(row_data.get("decay_factor") or 1.0))
             except Exception:
                 auto_notes = ""
             if not auto_notes:
@@ -1093,77 +1229,6 @@ def decay(
              "late": [d.__dict__ for d in late]},
             ensure_ascii=False, indent=2, default=str,
         ))
-
-
-def _save_submissions(submissions: list, save_dir: Path, assignment_title: str) -> dict[str, list[Path]]:
-    """Save each student's files to save_dir/assignment_title/ for human review.
-
-    Saves every attachment plus a `_text.txt` for the text answer (if any).
-    Returns a map of student_id -> saved file paths (used by CLI grader engines).
-    """
-    import re
-    import shutil
-
-    # ORFS/EDA binary artifacts are ungradeable and can crash a reader tool —
-    # keep them on disk for humans but out of the grader's file list.
-    _JUNK_EXT = {".odb", ".spef", ".sdf", ".lib", ".lef", ".def", ".db",
-                 ".bin", ".a", ".o", ".so", ".v", ".sv", ".cdl", ".gds"}
-    _MAX_LISTED_SIZE = 50 * 1024 * 1024
-
-    def _gradeable(p: Path) -> bool:
-        if is_archive(p.name) or p.suffix.lower() in _JUNK_EXT:
-            return False
-        try:
-            return p.stat().st_size <= _MAX_LISTED_SIZE
-        except OSError:
-            return False
-
-    from crawler.extract import (
-        _unique, dir_files, extract_archive, extract_docx_media, is_archive,
-        render_pdf_pages, text_sidecar,
-    )
-    safe_title = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', assignment_title)
-    dest = save_dir / safe_title
-    dest.mkdir(parents=True, exist_ok=True)
-    files_map: dict[str, list[Path]] = {}
-    for sub in submissions:
-        # Per-student layout:
-        #   <sid>_<name>/originals/  — the raw uploads, original filenames
-        #   <sid>_<name>/grading/    — everything the grader sees: extracted
-        #                            archive trees, non-archive copies,
-        #                            .txt sidecars, rendered PDF pages,
-        #                            embedded docx media, text answers
-        safe_name = re.sub(r'[^\w\u4e00-\u9fff]', '_', sub.student_name)
-        sdir = dest / f"{sub.student_id}_{safe_name}"
-        # Remove stale artifacts from previous runs, including the old flat
-        # layout (<sid>_<name>.zip / _files/ / .pdf_pages/) at top level.
-        for p in dest.iterdir():
-            if p.name.startswith(f"{sub.student_id}_"):
-                shutil.rmtree(p) if p.is_dir() else p.unlink()
-        originals = sdir / "originals"
-        grading = sdir / "grading"
-        originals.mkdir(parents=True)
-        grading.mkdir()
-
-        for att in sub.attachments:
-            orig = _unique(originals / Path(att.filename).name)
-            orig.write_bytes(att.data)
-            if is_archive(att.filename):
-                extract_archive(orig, grading)
-            else:
-                shutil.copy2(orig, grading / orig.name)
-
-        # .pdf/.docx get a .txt sidecar plus rendered/embedded images so the
-        # grader can read the text AND visually verify figures/screenshots.
-        for p in list(dir_files(grading)):
-            text_sidecar(p)
-            render_pdf_pages(p)
-            extract_docx_media(p)
-        if sub.text_content.strip():
-            (grading / f"{sub.student_id}_{safe_name}_text.txt").write_text(
-                sub.text_content, encoding="utf-8")
-        files_map[sub.student_id] = [p for p in dir_files(grading) if _gradeable(p)]
-    return files_map
 
 
 if __name__ == "__main__":

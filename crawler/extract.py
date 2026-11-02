@@ -32,6 +32,8 @@ def _kind(name: str) -> str | None:
         return "gz_or_tar"
     if low.endswith(".7z"):
         return "7z"
+    if low.endswith(".rar"):
+        return "rar"
     return None
 
 
@@ -117,6 +119,25 @@ def _extract_7z(path: Path, dest_dir: Path, out: list[Path]) -> None:
             out.append(p)
 
 
+def _extract_rar(path: Path, dest_dir: Path, out: list[Path]) -> None:
+    """RAR has no stdlib reader; use whichever CLI extractor is installed."""
+    import shutil
+
+    if shutil.which("bsdtar"):
+        cmd = ["bsdtar", "-xf", str(path), "-C", str(dest_dir)]
+    elif shutil.which("7z"):
+        cmd = ["7z", "x", "-y", f"-o{dest_dir}", str(path)]
+    elif shutil.which("unrar"):
+        cmd = ["unrar", "x", "-o+", "-idq", str(path), str(dest_dir) + "/"]
+    else:
+        return
+    before = {p for p in dest_dir.rglob("*") if p.is_file()} if dest_dir.exists() else set()
+    subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+    for p in sorted(dest_dir.rglob("*")):
+        if p.is_file() and p not in before and p.stat().st_size <= _MAX_MEMBER_SIZE:
+            out.append(p)
+
+
 def extract_archive(path: Path, dest_dir: Path, depth: int = 0) -> list[Path]:
     """Extract `path` into dest_dir (inner structure preserved) and return the
     list of files written. Nested archives are extracted recursively up to
@@ -133,6 +154,8 @@ def extract_archive(path: Path, dest_dir: Path, depth: int = 0) -> list[Path]:
             _extract_gz_or_tar(path, dest_dir, out)
         elif kind == "7z":
             _extract_7z(path, dest_dir, out)
+        elif kind == "rar":
+            _extract_rar(path, dest_dir, out)
     except (zipfile.BadZipFile, tarfile.TarError, OSError, subprocess.SubprocessError):
         return out
     # Recurse into nested archives extracted in this pass.

@@ -37,7 +37,8 @@ except ImportError:
 
 
 def prompt_text(prompt_label: str, default: str = "", console: Console | None = None,
-                allow_interrupt: bool = False, prefill: bool = False) -> str:
+                allow_interrupt: bool = False, prefill: bool = False,
+                multiline: bool = False) -> str:
     """Prompt for text input using Python's built-in input() for better IME and cursor support.
 
     This is better than rich.prompt.Prompt for:
@@ -47,7 +48,8 @@ def prompt_text(prompt_label: str, default: str = "", console: Console | None = 
 
     With prefill=True the default is inserted into the input line itself
     (editable in place — Enter accepts it as-is); otherwise it is shown as a
-    "(default: …)" hint and an empty input returns it.
+    "(default: …)" hint and an empty input returns it. With multiline=True,
+    Enter submits, Ctrl+Enter (Ctrl-J) inserts a newline, and Esc cancels.
 
     If allow_interrupt is True, KeyboardInterrupt will be raised instead of returning default.
     """
@@ -66,7 +68,9 @@ def prompt_text(prompt_label: str, default: str = "", console: Console | None = 
     if prefill:
         try:
             from prompt_toolkit import prompt as pt_prompt
-            result = pt_prompt("> ", default=default)
+            bindings = _notes_key_bindings() if multiline else None
+            result = pt_prompt("> ", default=default, multiline=multiline,
+                               key_bindings=bindings)
             return result.strip()
         except KeyboardInterrupt:
             if allow_interrupt:
@@ -88,6 +92,27 @@ def prompt_text(prompt_label: str, default: str = "", console: Console | None = 
         if allow_interrupt:
             raise
         return default
+
+
+def _notes_key_bindings():
+    """Enter submits, Ctrl+Enter (Ctrl-J) newlines, Esc cancels."""
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):
+        event.app.exit(result=event.current_buffer.text)
+
+    @kb.add("c-j")
+    def _newline(event):
+        event.current_buffer.insert_text("\n")
+
+    @kb.add("escape", eager=True)
+    def _cancel(event):
+        event.app.exit(exception=KeyboardInterrupt)
+
+    return kb
 
 
 def find_submission_file(submissions_dir: Path, student_id: str, student_name: str) -> Path | None:
@@ -174,9 +199,9 @@ def load_review_data(
     idx = {name: i for i, name in enumerate(headers)}
 
     def _pct(row_data: dict) -> float:
+        # Final score, so late submissions (raw 100 × decay) still surface.
         total_max = float(row_data.get("total_max") or 0)
-        score = float(row_data.get("total_score") or 0)
-        return score / total_max * 100 if total_max > 0 else 0.0
+        return row_final_score(row_data) / total_max * 100 if total_max > 0 else 0.0
 
     rows: list[tuple[int, dict]] = []
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -314,7 +339,8 @@ def _draft_notes(row_data: dict, current_score: float, total_max: float) -> str:
             confidence=float(row_data.get("confidence") or 0),
             breakdown=[CriterionScore(**b) for b in _json.loads(row_data.get("breakdown_json") or "[]")],
         )
-        return result.deduction_summary()
+        return result.deduction_summary(
+            decay_factor=float(row_data.get("decay_factor") or 1.0))
     except Exception:
         return ""
 
@@ -332,16 +358,29 @@ def handle_approve(session: ReviewSession, row_idx: int, row_data: dict, console
             current_score = float(row_data.get("total_score", 0) or 0)
     else:
         current_score = float(row_data.get("total_score", 0) or 0)
-    is_perfect = current_score >= total_max
+    # Decayed scores count as non-perfect: a late 100 is not a perfect submission.
+    is_perfect = row_final_score(row_data) >= total_max
 
     # Reviewer notes (sent to the student as richContent) only make sense for
     # non-perfect scores — they explain deductions. Perfect scores get none.
     if not is_perfect:
         draft = _draft_notes(row_data, current_score, total_max)
-        edited = prompt_text("[bold cyan]Reviewer notes[/bold cyan] [dim](编辑后回车确认，清空回车则无 notes)[/dim]",
-                             default=draft, console=console, prefill=True)
+        try:
+            edited = prompt_text(
+                "[bold cyan]Reviewer notes[/bold cyan] "
+                "[dim](Enter 提交，Ctrl+Enter 换行，Esc 取消)[/dim]",
+                default=draft, console=console, prefill=True, multiline=True,
+                allow_interrupt=True)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled — not approved.[/yellow]")
+            return False
         if not edited:
-            if not Confirm.ask("[bold cyan]No reviewer notes — approve anyway?[/bold cyan]", default=False):
+            try:
+                approve_anyway = Confirm.ask(
+                    "[bold cyan]No reviewer notes — approve anyway?[/bold cyan]", default=False)
+            except KeyboardInterrupt:
+                approve_anyway = False
+            if not approve_anyway:
                 console.print("[yellow]Cancelled — not approved.[/yellow]")
                 return False
         row_data["reviewer_notes"] = edited
@@ -364,9 +403,9 @@ def handle_notes(session: ReviewSession, row_idx: int, row_data: dict, console: 
                      if current_score < total_max
                      else str(row_data.get("reviewer_notes") or ""))
     try:
-        new_notes = prompt_text("[bold cyan]Reviewer notes[/bold cyan] [dim](预填当前内容，编辑后回车)[/dim]",
+        new_notes = prompt_text("[bold cyan]Reviewer notes[/bold cyan] [dim](预填当前内容，Esc+Enter 提交，Enter 换行)[/dim]",
                                 default=current_notes, console=console,
-                                allow_interrupt=True, prefill=True)
+                                allow_interrupt=True, prefill=True, multiline=True)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled - notes not changed.[/yellow]")
         return
@@ -400,7 +439,12 @@ def handle_override(session: ReviewSession, row_idx: int, row_data: dict, consol
     current_override = row_data.get("reviewer_override_score", "")
     if current_override:
         console.print(f"\n[bold]Current override:[/bold] {current_override}")
-    new_score = Prompt.ask("[bold cyan]Enter override score[/bold cyan]", default=str(current_override) if current_override else "")
+    try:
+        new_score = Prompt.ask("[bold cyan]Enter override score[/bold cyan]",
+                               default=str(current_override) if current_override else "")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled — override unchanged.[/yellow]")
+        return
     if new_score:
         try:
             score_val = float(new_score)
@@ -444,9 +488,16 @@ def edit_breakdown(console: Console, breakdown: list) -> tuple[list, float, floa
         console.print(f"\n[bold]Current Total:[/bold] {current_total} / {current_max}")
         console.print()
 
-        choice = Prompt.ask("[bold magenta]Criterion # to edit, or [d]one[/bold magenta]",
-                           choices=[str(i) for i in range(1, len(breakdown) + 1)] + ["d", "done"],
-                           default="d")
+        try:
+            choice = Prompt.ask(
+                "[bold magenta]Criterion # to edit, or [d]one[/bold magenta]",
+                choices=[str(i) for i in range(1, len(breakdown) + 1)] + ["d", "done"],
+                default="d")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled — breakdown unchanged.[/yellow]")
+            new_total = sum(float(b.get("points_awarded", 0)) for b in breakdown)
+            new_max = sum(float(b.get("points_max", 0)) for b in breakdown)
+            return breakdown, new_total, new_max
 
         if choice.lower() in ("d", "done"):
             new_total = sum(float(b.get("points_awarded", 0)) for b in breakdown)
@@ -460,8 +511,12 @@ def edit_breakdown(console: Console, breakdown: list) -> tuple[list, float, floa
         console.print(f"  Current: {item.get('points_awarded', 0)} / {item.get('points_max', 0)}")
         console.print(f"  Reasoning: {item.get('reasoning', '')}")
 
-        new_score = Prompt.ask(f"  New score (0-{item.get('points_max', 0)})",
-                              default=str(item.get("points_awarded", 0)))
+        try:
+            new_score = Prompt.ask(f"  New score (0-{item.get('points_max', 0)})",
+                                   default=str(item.get("points_awarded", 0)))
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled — score unchanged.[/yellow]")
+            continue
         try:
             score_val = float(new_score)
             max_val = float(item.get("points_max", 0))

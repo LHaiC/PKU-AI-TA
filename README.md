@@ -4,7 +4,7 @@ Grade homework from [course.pku.edu.cn](https://course.pku.edu.cn)
 (Blackboard) with an LLM or an agentic CLI, review in a TUI, apply late
 penalties, and push approved scores back.
 
-`grade` → `review`/`approve` → `decay` → `submit`
+`crawl` (optional) → `grade` / `import-grades` → `review`/`approve` → `decay` → `submit`
 
 ## Install
 
@@ -30,10 +30,19 @@ needs my attention".
 Review policy — **100/100 never reaches a human**:
 
 ```bash
+uv run python main.py crawl   --course _98024_1 --column 423829 --out ../Lab1/scores.xlsx
 uv run python main.py grade   --course _98024_1 --column 423829 --out ../Lab1/scores.xlsx
 uv run python main.py approve --auto-perfect --include-flagged --scores ../Lab1/scores.xlsx
 uv run python main.py review  --needs-review --scores ../Lab1/scores.xlsx
 uv run python main.py submit  --scores ../Lab1/scores.xlsx --dry-run   # then run it yourself
+```
+
+When grading is done by an external agent, write one `<student_id>.json` per
+student (the `ScoringResult` schema) and import them — totals must equal the
+breakdown sum, otherwise the import aborts:
+
+```bash
+uv run python main.py import-grades ../Lab1/grades --scores ../Lab1/scores.xlsx --column 423829
 ```
 
 `--include-flagged` approves perfect scores that carry a review flag, so the
