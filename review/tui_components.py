@@ -17,6 +17,8 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
+from review.spreadsheet import row_final_score
+
 # Enable readline for better line editing (arrow keys, history, etc.)
 try:
     import readline
@@ -213,17 +215,18 @@ def auto_approve_students(ws: Any, idx: dict, console: Console,
         if not row[idx["student_id"]]:
             continue
         row_data = {name: row[i] if i < len(row) else None for name, i in idx.items()}
-        # Check: 100 points, no flags/uncertainties, not already approved
-        total_score = float(row_data.get("total_score", 0) or 0)
-        total_max = float(row_data.get("total_max", 100) or 100)
+        # Check: 100 points after override + decay, no flags/uncertainties,
+        # not already approved
+        total_score = row_final_score(row_data)
+        total_max = float(row_data.get("total_max", 0) or 0)
         flagged = (row_data.get("needs_review") == "YES"
                    or str(row_data.get("uncertain_parts_json") or "").strip() not in ("", "[]", "null"))
         already_approved = str(row_data.get("approved", "")).upper() == "YES"
 
-        if total_score >= total_max and not already_approved and (include_flagged or not flagged):
+        if total_max > 0 and total_score >= total_max and not already_approved and (include_flagged or not flagged):
             student_name = row_data.get("student_name", "")
             student_id = row_data.get("student_id", "")
-            console.print(f"  [dim]Auto-approving:[/dim] {student_name} ({student_id}) — {total_score}/{total_max}")
+            console.print(f"  [dim]Auto-approving:[/dim] {student_name} ({student_id}) — {total_score:g}/{total_max:g}")
             ws.cell(row=row_idx, column=idx["approved"] + 1, value="YES")
             auto_approved += 1
             modified = True
@@ -351,8 +354,15 @@ def handle_approve(session: ReviewSession, row_idx: int, row_data: dict, console
     return True
 
 def handle_notes(session: ReviewSession, row_idx: int, row_data: dict, console: Console) -> None:
-    """Handle the 'notes' action — input line pre-filled with current notes."""
-    current_notes = str(row_data.get("reviewer_notes") or "")
+    """Handle the 'notes' action — input line pre-filled with current or draft notes."""
+    total_max = float(row_data.get("total_max", 100) or 100)
+    override = row_data.get("reviewer_override_score")
+    current_score = (float(override) if override not in (None, "")
+                     else float(row_data.get("total_score", 0) or 0))
+    # Perfect scores carry no deduction summary; keep their existing notes only.
+    current_notes = (_draft_notes(row_data, current_score, total_max)
+                     if current_score < total_max
+                     else str(row_data.get("reviewer_notes") or ""))
     try:
         new_notes = prompt_text("[bold cyan]Reviewer notes[/bold cyan] [dim](预填当前内容，编辑后回车)[/dim]",
                                 default=current_notes, console=console,

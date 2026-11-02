@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import openpyxl
 from typer.testing import CliRunner
 
 from main import app
@@ -8,6 +9,22 @@ from models import CriterionScore, ScoringResult
 from review.spreadsheet import export, load_reviewed
 
 runner = CliRunner()
+
+
+def set_cell(path: Path, student_id: str, column: str, value) -> None:
+    """Write one cell, appending the column header when it does not exist."""
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    headers = [cell.value for cell in ws[1]]
+    if column not in headers:
+        headers.append(column)
+        ws.cell(row=1, column=len(headers), value=column)
+    col = headers.index(column) + 1
+    for row_idx in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row_idx, column=1).value) == student_id:
+            ws.cell(row=row_idx, column=col, value=value)
+            break
+    wb.save(path)
 
 
 def make_result(
@@ -188,6 +205,39 @@ class TestApproveCommand:
         assert records["2023001001"].approved is True
         assert records["2023001002"].approved is False
         assert records["2023001003"].approved is True
+
+    def test_auto_perfect_respects_decay(self, tmp_path):
+        scores = write_scores(tmp_path, [
+            make_result("2023001001", total_score=100.0),
+            make_result("2023001002", total_score=100.0),
+        ])
+        set_cell(scores, "2023001001", "decay_factor", 1.0)
+        set_cell(scores, "2023001002", "decay_factor", 0.8)
+        result = runner.invoke(app, [
+            "approve", "--auto-perfect", "--scores", str(scores), "--json",
+        ])
+        assert result.exit_code == 0
+        records = {r.result.student_id: r for r in load_reviewed(scores)}
+        assert records["2023001001"].approved is True
+        # Raw 100 but late: final is 80, so a human must look at it.
+        assert records["2023001002"].approved is False
+        payload = json.loads(result.stdout)
+        assert [c["student_id"] for c in payload["changes"]] == ["2023001001"]
+
+    def test_auto_perfect_uses_reviewer_override(self, tmp_path):
+        scores = write_scores(tmp_path, [
+            make_result("2023001001", total_score=90.0),
+            make_result("2023001002", total_score=100.0),
+        ])
+        set_cell(scores, "2023001001", "reviewer_override_score", 100.0)
+        set_cell(scores, "2023001002", "reviewer_override_score", 90.0)
+        result = runner.invoke(app, ["approve", "--auto-perfect", "--scores", str(scores)])
+        assert result.exit_code == 0
+        records = {r.result.student_id: r for r in load_reviewed(scores)}
+        # Hand-raised to perfect: acceptable to auto-approve.
+        assert records["2023001001"].approved is True
+        # Hand-lowered from perfect: not perfect any more.
+        assert records["2023001002"].approved is False
 
     def test_include_flagged_requires_auto_perfect(self, tmp_path):
         scores = write_scores(tmp_path, [make_result("2023001001", total_score=100.0)])

@@ -174,7 +174,7 @@ uv run python main.py approve --student 2300012345 --scores scores.xlsx --json
 | `--notes` | Reviewer notes to store |
 | `--force` | Allow a non-perfect approval without notes |
 | `--revoke` | Set `approved` back to `NO` |
-| `--auto-perfect` | Approve 100/100 records with no flags or uncertain parts |
+| `--auto-perfect` | Approve records whose final score (override × decay) equals the max, with no flags or uncertain parts |
 | `--include-flagged` | With `--auto-perfect`: approve perfect records even if flagged or uncertain |
 | `--json` | Print one JSON document and nothing else |
 

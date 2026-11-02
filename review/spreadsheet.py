@@ -40,6 +40,23 @@ COLUMNS = [
 ]
 
 
+def row_final_score(row_data: dict) -> float:
+    """Post-override, post-decay score of one spreadsheet row.
+
+    Same arithmetic as ReviewRecord.final_score and `ta submit`: a reviewer
+    override replaces the LLM score, and the late-submission factor multiplies
+    on top. "Perfect" must be judged on this number, not the raw total_score,
+    otherwise decayed 100s get approved as if on time and hand-raised
+    overrides are ignored.
+    """
+    base = row_data.get("reviewer_override_score")
+    if base in (None, ""):
+        base = row_data.get("total_score")
+    factor_raw = row_data.get("decay_factor")
+    factor = float(factor_raw) if factor_raw not in (None, "") else 1.0
+    return float(base or 0) * factor
+
+
 def export(results: list[ScoringResult], path: Path) -> None:
     """Write scoring results to an Excel file.
 

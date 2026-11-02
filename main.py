@@ -773,7 +773,7 @@ def approve(
     notes: Annotated[str, typer.Option("--notes", help="Reviewer notes to store")] = "",
     force: Annotated[bool, typer.Option("--force", help="Allow approving a non-perfect score without notes")] = False,
     revoke: Annotated[bool, typer.Option("--revoke", help="Set approved back to NO instead of YES")] = False,
-    auto_perfect: Annotated[bool, typer.Option("--auto-perfect", help="Approve every perfect score that is not flagged for review")] = False,
+    auto_perfect: Annotated[bool, typer.Option("--auto-perfect", help="Approve every perfect final score (after override and decay) that is not flagged for review")] = False,
     include_flagged: Annotated[bool, typer.Option("--include-flagged", help="With --auto-perfect: also approve perfect scores flagged for review")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
 ) -> None:
@@ -784,6 +784,7 @@ def approve(
     This command only edits the spreadsheet; it never submits anything.
     """
     from review.tui_components import auto_approve_students, load_review_data
+    from review.spreadsheet import row_final_score
 
     if not scores.exists():
         console.print(f"[red]Error:[/red] Scores file not found: {scores}")
@@ -808,12 +809,12 @@ def approve(
     auto_ids: list[str] = []
     if auto_perfect:
         for _row_idx, row_data in rows:
-            total_score = float(row_data.get("total_score") or 0)
-            total_max = float(row_data.get("total_max") or 100)
+            final_score = row_final_score(row_data)
+            total_max = float(row_data.get("total_max") or 0)
             flagged = (row_data.get("needs_review") == "YES"
                        or str(row_data.get("uncertain_parts_json") or "").strip()
                        not in ("", "[]", "null"))
-            if (total_score >= total_max
+            if (total_max > 0 and final_score >= total_max
                     and (include_flagged or not flagged)
                     and str(row_data.get("approved", "")).upper() != "YES"):
                 auto_ids.append(str(row_data.get("student_id")))
