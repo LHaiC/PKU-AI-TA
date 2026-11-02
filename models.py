@@ -72,6 +72,7 @@ class ReviewRecord(BaseModel):
     reviewer_override_score: float | None = None  # None = accept LLM score
     reviewer_notes: str = ""
     approved: bool = False
+    score_changed: bool = False  # approved, but the score changed since then
     decay_factor: float = 1.0  # late-submission multiplier; 1.0 = on time
 
     @property

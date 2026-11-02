@@ -42,6 +42,7 @@ rules into its task context and tell it to read `skill://pku-ta` first.
 | `grade` | Crawl submissions, score with the LLM API, export `scores.xlsx` |
 | `review` | Interactive TUI for reviewing students one by one |
 | `status` | Summarise progress; `--json` for machine-readable output |
+| `audit` | Check totals, decay arithmetic, notes and stale approvals |
 | `show` | Full detail for one student; `--json` for machine-readable output |
 | `approve` | Record a human review decision without the TUI |
 | `decay` | Apply the late-submission rule (`.ddl_rule`), annotating scores.xlsx in place |

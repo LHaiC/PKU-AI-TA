@@ -106,6 +106,15 @@ def _fetch_grade_pk(
     return m.group(1) if m else None
 
 
+def split_submittable(records):
+    """Split records into (ready to submit, stale approvals, unapproved)."""
+    approved = [r for r in records if r.approved]
+    changed = [r for r in approved if r.score_changed]
+    ready = [r for r in approved if not r.score_changed]
+    unapproved = [r for r in records if not r.approved]
+    return ready, changed, unapproved
+
+
 def submit_scores(
     client: httpx.Client,
     course_id: str,
@@ -129,10 +138,12 @@ def submit_scores(
 
     grade_book_pk = column_id.strip("_").split("_")[0]
 
-    approved = [r for r in records if r.approved]
-    skipped = len(records) - len(approved)
-    if skipped:
-        log(f"[yellow]Skipping {skipped} unapproved record(s).[/yellow]")
+    approved, changed, unapproved = split_submittable(records)
+    if unapproved:
+        log(f"[yellow]Skipping {len(unapproved)} unapproved record(s).[/yellow]")
+    if changed:
+        log(f"[yellow]Skipping {len(changed)} approved record(s) whose score "
+            f"changed after approval — re-approve them first.[/yellow]")
     if not approved:
         return []
 

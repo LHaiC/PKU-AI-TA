@@ -33,6 +33,7 @@ Review policy — **100/100 never reaches a human**:
 uv run python main.py crawl   --course _98024_1 --column 423829 --out ../Lab1/scores.xlsx
 uv run python main.py grade   --course _98024_1 --column 423829 --out ../Lab1/scores.xlsx
 uv run python main.py approve --auto-perfect --include-flagged --scores ../Lab1/scores.xlsx
+uv run python main.py audit   --scores ../Lab1/scores.xlsx   # totals/decay/notes
 uv run python main.py review  --needs-review --scores ../Lab1/scores.xlsx
 uv run python main.py submit  --scores ../Lab1/scores.xlsx --dry-run   # then run it yourself
 ```
@@ -45,7 +46,9 @@ breakdown sum, otherwise the import aborts:
 uv run python main.py import-grades ../Lab1/grades --scores ../Lab1/scores.xlsx --column 423829
 ```
 
-`--include-flagged` approves perfect scores that carry a review flag, so the
+Re-exporting a changed score keeps the approval but sets `score_changed=YES`;
+`submit` skips those rows and `status` lists them until a human re-approves
+(which clears the flag). `--include-flagged` approves perfect scores that carry a review flag, so the
 queue holds non-perfect rows only. Without it, `--auto-perfect` leaves flagged
 100s queued. Subagents may crawl, grade, and inspect; they must never approve
 or submit. The batch policy is confirmed by the human once, then run from the

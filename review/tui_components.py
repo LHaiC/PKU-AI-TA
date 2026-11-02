@@ -158,6 +158,8 @@ def open_file(filepath: Path, console: Console | None = None) -> None:
 
 def needs_review_check(row_data: dict) -> bool:
     """Check if a student needs review even if already approved."""
+    if str(row_data.get("score_changed") or "").strip().upper() == "YES":
+        return True
     # Check if score is perfect (consider override if present)
     total_max = float(row_data.get("total_max", 100) or 100)
     override_score = row_data.get("reviewer_override_score")
@@ -253,6 +255,8 @@ def auto_approve_students(ws: Any, idx: dict, console: Console,
             student_id = row_data.get("student_id", "")
             console.print(f"  [dim]Auto-approving:[/dim] {student_name} ({student_id}) — {total_score:g}/{total_max:g}")
             ws.cell(row=row_idx, column=idx["approved"] + 1, value="YES")
+            if "score_changed" in idx:
+                ws.cell(row=row_idx, column=idx["score_changed"] + 1, value="")
             auto_approved += 1
             modified = True
 
@@ -388,6 +392,9 @@ def handle_approve(session: ReviewSession, row_idx: int, row_data: dict, console
 
     session.ws.cell(row=row_idx, column=session.idx["approved"] + 1, value="YES")
     row_data["approved"] = "YES"
+    if "score_changed" in session.idx:
+        session.ws.cell(row=row_idx, column=session.idx["score_changed"] + 1, value="")
+        row_data["score_changed"] = ""
     session.update_row(row_idx, row_data)
     console.print("[green]Marked as approved.[/green]")
     return True

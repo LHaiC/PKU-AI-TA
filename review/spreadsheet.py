@@ -39,6 +39,7 @@ COLUMNS = [
     "reviewer_override_score",
     "reviewer_notes",
     "approved",
+    "score_changed",
 ]
 
 
@@ -101,6 +102,7 @@ def export(results: list[ScoringResult], path: Path) -> None:
         breakdown_json = json.dumps([b.model_dump() for b in r.breakdown], ensure_ascii=False)
         override_v, notes_v, approved_v = "", "", "NO"
         old = prior.get(str(r.student_id))
+        changed_v = ""
         if old is not None:
             override_v = old.get("reviewer_override_score") or ""
             notes_v = old.get("reviewer_notes") or ""
@@ -108,8 +110,11 @@ def export(results: list[ScoringResult], path: Path) -> None:
                 float(old.get("total_score") or 0) != r.total_score
                 or str(old.get("breakdown_json") or "") != breakdown_json
             )
-            if not changed and str(old.get("approved") or "").upper() == "YES":
+            if str(old.get("approved") or "").upper() == "YES":
+                # Keep the human decision but flag it: the score they approved
+                # is not the one now in the sheet. Re-approving clears the flag.
                 approved_v = "YES"
+                changed_v = "YES" if changed else ""
         row_data = [
             r.student_id,
             r.student_name,
@@ -124,7 +129,8 @@ def export(results: list[ScoringResult], path: Path) -> None:
             r.llm_reasoning,
             override_v,   # reviewer_override_score
             notes_v,      # reviewer_notes
-            approved_v,   # approved — preserved only if the result is unchanged
+            approved_v,
+            changed_v,    # score_changed — approved decision predates this score
         ]
         row_data += [(old or {}).get(n) for n in extra]
         for col, value in enumerate(row_data, start=1):
@@ -183,6 +189,7 @@ def load_reviewed(path: Path) -> list[ReviewRecord]:
         override_raw = row[idx["reviewer_override_score"]]
         override = float(override_raw) if override_raw not in (None, "") else None
         approved = str(row[idx["approved"]]).strip().upper() == "YES"
+        changed = str(row[idx["score_changed"]] if "score_changed" in idx else "").strip().upper() == "YES"
         decay_raw = row[idx["decay_factor"]] if "decay_factor" in idx else None
         decay = float(decay_raw) if decay_raw not in (None, "") else 1.0
 
@@ -191,6 +198,7 @@ def load_reviewed(path: Path) -> list[ReviewRecord]:
             reviewer_override_score=override,
             reviewer_notes=str(row[idx["reviewer_notes"]] or ""),
             approved=approved,
+            score_changed=changed,
             decay_factor=decay,
         ))
 

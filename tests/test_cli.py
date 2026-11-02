@@ -245,3 +245,17 @@ class TestApproveCommand:
             "approve", "--include-flagged", "--scores", str(scores)
         ])
         assert result.exit_code == 1
+
+
+def test_approve_clears_score_changed_flag(tmp_path):
+    path = tmp_path / "scores.xlsx"
+    export([make_result(total_score=85.0)], path)
+    set_cell(path, "2023001001", "approved", "YES")
+    set_cell(path, "2023001001", "score_changed", "YES")
+
+    result = runner.invoke(app, ["approve", "--student", "2023001001",
+                                 "--scores", str(path), "--notes", "ok"])
+    assert result.exit_code == 0, result.output
+    rec = load_reviewed(path)[0]
+    assert rec.approved is True
+    assert rec.score_changed is False

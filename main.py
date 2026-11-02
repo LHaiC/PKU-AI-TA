@@ -8,6 +8,7 @@ Commands:
   ta import-grades <dir> --scores <file>        Import grading JSON into scores.xlsx
   ta review      [--scores scores.xlsx]         Interactive TUI review (--demo included)
   ta status      [--scores scores.xlsx]         Summarise progress (--json)
+  ta audit       [--scores scores.xlsx]         Check totals, decay and notes
   ta show        --student <id>                 Full detail for one student (--json)
   ta approve     --student <id> [--score N]     Record a review decision (--json)
   ta submit      --course <id> --column <id>    Post approved grades (use --dry-run first)
@@ -731,6 +732,7 @@ def status(
 
     records = load_reviewed(scores)
     pending = [r for r in records if not r.approved]
+    stale = [r for r in records if r.approved and r.score_changed]
 
     def _row(r) -> dict:
         res = r.result
@@ -744,6 +746,7 @@ def status(
             "confidence": res.confidence,
             "needs_review": res.needs_review,
             "approved": r.approved,
+            "score_changed": r.score_changed,
             "reviewer_override_score": r.reviewer_override_score,
             "final_score": r.final_score,
             "reviewer_notes": r.reviewer_notes,
@@ -754,6 +757,7 @@ def status(
         "total": len(records),
         "approved": len(records) - len(pending),
         "pending": len(pending),
+        "stale_approvals": len(stale),
         "needs_review": sum(1 for r in pending if r.result.needs_review),
         "students": [_row(r) for r in records],
     }
@@ -768,8 +772,12 @@ def status(
         f"{payload['pending']} pending "
         f"([yellow]{payload['needs_review']} of them flagged for review[/yellow])"
     )
+    if stale:
+        console.print(f"[yellow]{len(stale)} approved record(s) changed after approval "
+                      f"— re-approve before submitting.[/yellow]")
     if not pending:
-        console.print("[green]Nothing pending — every record is approved.[/green]")
+        if not stale:
+            console.print("[green]Nothing pending — every record is approved.[/green]")
         return
 
     table = Table(title="Pending approval")
@@ -792,8 +800,95 @@ def status(
             "yes" if r.reviewer_notes else "-",
         )
     console.print(table)
+    if stale:
+        stale_table = Table(title="Changed after approval")
+        stale_table.add_column("Student ID", style="cyan")
+        stale_table.add_column("Name")
+        stale_table.add_column("Score", justify="right")
+        for r in stale:
+            stale_table.add_row(r.result.student_id, r.result.student_name,
+                                f"{r.final_score:g}/{r.result.total_max:g}")
+        console.print(stale_table)
     console.print("[dim]Approve with [bold]ta approve --student <id> --notes \"...\"[/bold], "
                   "then submit by hand with [bold]ta submit[/bold].[/dim]")
+
+
+@app.command()
+def audit(
+    scores: Annotated[Path, typer.Option(help="Excel spreadsheet to audit")] = Path("scores.xlsx"),
+    json_output: Annotated[bool, typer.Option("--json", help="Print machine-readable JSON only")] = False,
+) -> None:
+    """Check a reviewed spreadsheet for arithmetic and note inconsistencies.
+
+    Verifies total_score against the breakdown sum, the decay arithmetic and
+    its annotation columns, student-facing notes against the current score, and
+    lists approvals that went stale. Exits non-zero when anything is wrong.
+    """
+    import openpyxl
+    from review.spreadsheet import load_reviewed, row_final_score
+
+    if not scores.exists():
+        console.print(f"[red]Error:[/red] Scores file not found: {scores}")
+        raise typer.Exit(1)
+
+    wb = openpyxl.load_workbook(scores)
+    ws = wb.active
+    headers = [c.value for c in ws[1]]
+    rows = {str(row[0]): dict(zip(headers, row)) for row in
+            ws.iter_rows(min_row=2, values_only=True) if row and row[0]}
+
+    records = load_reviewed(scores)
+    issues: list[dict] = []
+    for r in records:
+        sid = r.result.student_id
+        row = rows.get(sid, {})
+        awarded = sum(b.points_awarded for b in r.result.breakdown)
+        if abs(awarded - r.result.total_score) > 0.01:
+            issues.append({"student_id": sid, "check": "total",
+                           "detail": f"breakdown {awarded:g} != total {r.result.total_score:g}"})
+        if r.result.total_max <= 0:
+            issues.append({"student_id": sid, "check": "total_max", "detail": "not positive"})
+        if abs(row_final_score(row) - r.final_score) > 0.01:
+            issues.append({"student_id": sid, "check": "decay",
+                           "detail": "final score arithmetic"})
+        if r.decay_factor < 1:
+            missing = [k for k in ("submitted_at", "hours_late", "decay_factor", "decay_reason")
+                       if row.get(k) in (None, "")]
+            if missing:
+                issues.append({"student_id": sid, "check": "decay columns",
+                               "detail": ", ".join(missing)})
+        if r.approved and r.score_changed:
+            issues.append({"student_id": sid, "check": "stale approval",
+                           "detail": "score changed after approval"})
+        if r.approved and r.final_score < r.result.total_max and not r.reviewer_notes.strip():
+            issues.append({"student_id": sid, "check": "notes", "detail": "approved without feedback"})
+        header = next((line for line in r.reviewer_notes.splitlines()
+                       if line.strip().startswith("得分")), "")
+        if header:
+            import re
+            m = re.search(r"得分\s*([\d.]+)\s*/", header)
+            if m and abs(float(m.group(1)) - r.final_score) > 0.01:
+                issues.append({"student_id": sid, "check": "notes score",
+                               "detail": f"{m.group(1)} != final {r.final_score:g}"})
+
+    if json_output:
+        typer.echo(json.dumps({"scores": str(scores), "records": len(records),
+                               "issues": issues}, ensure_ascii=False, indent=2))
+    else:
+        console.print(f"[bold]{scores}[/bold]: {len(records)} record(s), "
+                      f"{len(issues)} issue(s)")
+        if issues:
+            table = Table(title="Audit issues")
+            table.add_column("Student")
+            table.add_column("Check")
+            table.add_column("Detail")
+            for i in issues[:50]:
+                table.add_row(i["student_id"], i["check"], i["detail"])
+            console.print(table)
+        else:
+            console.print("[green]All checks passed.[/green]")
+    if issues:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -977,6 +1072,8 @@ def approve(
 
         if revoke:
             ws.cell(row=row_idx, column=idx["approved"] + 1, value="NO")
+            if "score_changed" in idx:
+                ws.cell(row=row_idx, column=idx["score_changed"] + 1, value="")
             changes.append({"student_id": sid, "ok": True, "approved": False})
             modified = True
             continue
@@ -1033,6 +1130,8 @@ def approve(
         elif auto_notes:
             ws.cell(row=row_idx, column=idx["reviewer_notes"] + 1, value=auto_notes)
         ws.cell(row=row_idx, column=idx["approved"] + 1, value="YES")
+        if "score_changed" in idx:
+            ws.cell(row=row_idx, column=idx["score_changed"] + 1, value="")
         changes.append({"student_id": sid, "ok": True, "approved": True, "final_score": effective_score})
         modified = True
 
